@@ -4,7 +4,7 @@ async function startWorker() {
     console.log("Worker started!");
     while (true) {
         try {
-            const result = await redis.blpop("main-queue", 0);
+            const result = await redis.brpop("main-queue", 0);
             if (result) {
                 const [queueName, data] = result;
                 const job = JSON.parse(data);

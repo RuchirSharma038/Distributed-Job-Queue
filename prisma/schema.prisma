@@ -1,0 +1,18 @@
+datasource db {
+  provider = "postgresql"
+  // url line is completely deleted!
+}
+
+model Job {
+  id            String    @id @default(uuid())
+  type          String    
+  payload       Json      
+  status        String    @default("queued") 
+  error_message String?   
+  
+  created_at    DateTime  @default(now())
+  started_at    DateTime? 
+  completed_at  DateTime? 
+  
+  @@index([status])       
+}

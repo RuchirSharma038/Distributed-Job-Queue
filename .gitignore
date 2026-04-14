@@ -2,3 +2,16 @@ node_modules/
 .env
 dist/
 build/
+/src/generated/prisma
+
+# Prisma generated folders 
+/prisma/sqlite.db
+/prisma/sqlite.db-journal
+
+# Logs 
+logs
+*.log
+npm-debug.log*
+
+# OS generated files
+.DS_Store
