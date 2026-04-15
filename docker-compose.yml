@@ -21,5 +21,12 @@ services:
     ports:
       - "6379:6379"
 
+  redis_insight:
+    image: redis/redisinsight:latest
+    container_name: job_queue_insight
+    restart: always
+    ports:
+      - "5540:5540"
+
 volumes:
   pgdata:
