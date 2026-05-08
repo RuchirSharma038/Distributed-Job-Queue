@@ -3,7 +3,7 @@ const jobSchemas = {
     'SEND_EMAIL': ['to', 'subject', 'body'],
     'SCRAPE_WEBSITE': ['url', 'targetSelector'],
     'PROCESS_IMAGE': ['inputPath', 'filename', 'operations'],
-    'GENERATE_PDF': ['htmlContent', 'filename']
+    'GENERATE_PDF': ['filename', 'invoiceData']
 };
 
 

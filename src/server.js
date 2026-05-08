@@ -9,6 +9,7 @@ const app = express();
 
 app.use(express.json());
 app.use('/api',jobRoutes);
+app.use('/static', express.static('public'));
 //const server = http.createServer(app);
 
 app.listen(PORT,  () => {
