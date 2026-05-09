@@ -5,8 +5,6 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url = env("DATABASE_URL)
-  // url line is completely deleted!
 }
 
 model Job {
@@ -20,5 +18,16 @@ model Job {
   started_at    DateTime? 
   completed_at  DateTime? 
   
+  retry_count   Int       @default(0)
+  max_retries   Int       @default(3)
+  next_retry_at DateTime?
+  result_data   Json?
+
   @@index([status])       
+}
+
+model SentEmail {
+  idempotency_key String   @id
+  message_id      String
+  sent_at         DateTime @default(now())
 }
