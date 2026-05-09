@@ -30,6 +30,14 @@ module.exports = {
             env:{
                 QUEUE_NAME:"queue:compute"
             }
+        },
+
+        // 4. Delayed Queue Scheduler
+        {
+            name: "scheduler",
+            script: "./src/workers/scheduler.js",
+            instances: 1,
+            exec_mode: "fork"
         }
 
     ]
