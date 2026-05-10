@@ -2,79 +2,126 @@ import sharp from 'sharp';
 import path from 'path';
 import fs from 'fs/promises';
 
+const OUTPUT_DIR = './public/processed';
+
+function getOutputPath(baseName, operation) {
+    const map = {
+        thumbnail: `${baseName}-thumb.jpg`,
+        webp: `${baseName}.webp`,
+        grayscale: `${baseName}-bw.jpg`,
+    };
+    return path.join(OUTPUT_DIR, map[operation]);
+}
+
+async function fileExists(filePath) {
+    try {
+        const stats = await fs.access(filePath);
+        return stats.size > 0;
+    } catch {
+        return false;
+    }
+}
 
 const processImage = async (payload) => {
     const { inputPath, filename, operations } = payload;
+    const baseName = path.parse(filename).name;
 
-    console.log(`[Image Handler] Processing: ${filename}`);
+    jobLogger.info({ filename, operations }, "Starting image processing");
 
-    // Ensure the input file actually exists before burning CPU
-    try {
-        await fs.access(inputPath);
-    } catch (err) {
-        throw new Error(`Input file not found at ${inputPath}`);
+    await fs.mkdir(OUTPUT_DIR, { recursive: true });
+
+
+    // IDEMPOTENCY CHECK
+
+    const existingResults = {};
+    const pendingOperations = [];
+
+    for (const op of operations) {
+        const outputPath = getOutputPath(baseName, op);
+        if (await fileExists(outputPath)) {
+            // Already done on a previous attempt — include in results
+            existingResults[op] = `/processed/${path.basename(outputPath)}`;
+            jobLogger.info({ operation: op }, "Idempotency: Output already exists and is valid, skipping");
+        } else {
+            pendingOperations.push(op);
+        }
     }
 
-    // Define where the finished files will go
-    // In production, this would be an S3 bucket upload
-    const outputDir = './public/processed'; 
-    await fs.mkdir(outputDir, { recursive: true });
+    // All operations already completed — nothing to do
+    if (pendingOperations.length === 0) {
+        jobLogger.info("All outputs already exist — returning cached results");
+        return { success: true, generatedFiles: existingResults };
+    }
 
-    // Strip the extension (e.g., 'photo.jpg' -> 'photo')
-    const baseName = path.parse(filename).name;
-    const results = {};
+
+    // We have work to do — check the source file exists
 
     try {
-        // Initialize the Sharp instance (loads the image into memory/buffer)
+        await fs.access(inputPath);
+    } catch {
+
+        if (Object.keys(existingResults).length > 0) {
+            jobLogger.warn("Source gone but partial results exist — returning what we have");
+            return { success: true, generatedFiles: existingResults };
+        }
+
+        const err = new Error(`Source file not found at ${inputPath} and no outputs exist`);
+        err.permanent = true;
+        throw err;
+    }
+
+
+    // Process only the pending operations
+
+    const newResults = {};
+
+    try {
         const imagePipeline = sharp(inputPath);
 
-        //  Generate Thumbnail
-        if (operations.includes('thumbnail')) {
-            const thumbPath = path.join(outputDir, `${baseName}-thumb.jpg`);
+        if (pendingOperations.includes('thumbnail')) {
+            const thumbPath = getOutputPath(baseName, 'thumbnail');
             await imagePipeline
-                .clone() // Clone prevents operations from affecting each other
+                .clone()
                 .resize(200, 200, { fit: 'cover' })
                 .jpeg({ quality: 80 })
                 .toFile(thumbPath);
-            
-            results.thumbnail = `/processed/${baseName}-thumb.jpg`;
+            newResults.thumbnail = `/processed/${path.basename(thumbPath)}`;
         }
 
-        //  Generate WebP
-        if (operations.includes('webp')) {
-            const webpPath = path.join(outputDir, `${baseName}.webp`);
+        if (pendingOperations.includes('webp')) {
+            const webpPath = getOutputPath(baseName, 'webp');
             await imagePipeline
                 .clone()
-                .webp({ quality: 75 }) // High compression
+                .webp({ quality: 75 })
                 .toFile(webpPath);
-            
-            results.webp = `/processed/${baseName}.webp`;
+            newResults.webp = `/processed/${path.basename(webpPath)}`;
         }
 
-        //  Generate Grayscale
-        if (operations.includes('grayscale')) {
-            const grayPath = path.join(outputDir, `${baseName}-bw.jpg`);
+        if (pendingOperations.includes('grayscale')) {
+            const grayPath = getOutputPath(baseName, 'grayscale');
             await imagePipeline
                 .clone()
                 .grayscale()
                 .jpeg({ quality: 90 })
                 .toFile(grayPath);
-            
-            results.grayscale = `/processed/${baseName}-bw.jpg`;
+            newResults.grayscale = `/processed/${path.basename(grayPath)}`;
         }
 
-        //  Clean up the raw original file to save disk space
-        await fs.unlink(inputPath);
-        console.log(`[Image Handler] Success! Cleaned up raw file.`);
 
-        // Return the paths to the main worker loop so it can update Postgres
+        try {
+            await fs.unlink(inputPath);
+            jobLogger.info("Cleaned up source file");
+        } catch (cleanupError) {
+            jobLogger.warn({ err: cleanupError.message }, "Failed to delete source file, but job succeeded. Proceeding.");
+        }
+
         return {
             success: true,
-            generatedFiles: results
+            generatedFiles: { ...existingResults, ...newResults },
         };
 
     } catch (error) {
-        console.error(`[Image Handler] Failed: ${error.message}`);
+        jobLogger.error({ err: error.message }, "Image processing pipeline failed");
         throw error;
     }
 };
