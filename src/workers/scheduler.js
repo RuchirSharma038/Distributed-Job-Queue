@@ -1,4 +1,3 @@
-// src/workers/scheduler.js
 import redis from "../config/redis.js";
 import prisma from "../config/database.js";
 import { logger } from "../config/logger.js";
