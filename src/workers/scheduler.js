@@ -29,9 +29,8 @@ async function promoteReadyJobs() {
                 continue;
             }
 
-            // Safety check: if the job was somehow cancelled or failed permanently
-            // between scheduling and now, don't re-queue it.
-            if (job.status === 'failed' || job.status === 'completed') {
+            // Safety check
+            if (job.status === 'failed' || job.status === 'completed' || job.status==='dead') {
                 logger.warn({ jobId, status: job.status }, "Delayed job is already terminal — removing from sorted set");
                 await redis.zrem(DELAYED_QUEUE, jobId);
                 continue;
@@ -45,8 +44,8 @@ async function promoteReadyJobs() {
                 continue;
             }
 
-            // Atomic-ish promotion:
-            // LPUSH first (job is available to workers), then ZREM.
+            // Atomic-ish promotion
+            
             await redis.lpush(targetQueue, jobId);
             await redis.zrem(DELAYED_QUEUE, jobId);
 

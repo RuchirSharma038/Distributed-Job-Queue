@@ -2,7 +2,7 @@ import redis from "../config/redis.js";
 import prisma from "../config/database.js";
 import { logger } from "../config/logger.js";
 import { handlers } from "./handlers/handlerMap.js";
-import { QUEUE_ROUTING, DELAYED_QUEUE, RETRY_BASE_DELAY_MS } from "../config/constants.js";
+import { QUEUE_ROUTING, DELAYED_QUEUE, RETRY_BASE_DELAY_MS, DEAD_QUEUE } from "../config/constants.js";
 
 const QUEUE_NAME = process.env.QUEUE_NAME || "queue:io";
 
@@ -44,11 +44,16 @@ async function markFailed(job, handlerError) {
         data: {
             status:        'failed',
             error_message: handlerError.message,
+            dead_at:       new Date(),
         }
     });
+
+    //Push to Dead Queue
+    await redis.lpush(DEAD_QUEUE, job.id);
+
     logger.error(
         { jobId: job.id, type: job.type, retries: job.retry_count },
-        `Job permanently failed after ${job.retry_count} retries: ${handlerError.message}`
+        `Job moved to Dead Letter Queue after ${job.retry_count} retries: ${handlerError.message}`
     );
 }
 
@@ -77,7 +82,7 @@ async function startWorker() {
             }
 
             // Guard: if the job is already completed or permanently failed
-            if (job.status === 'completed' || job.status === 'failed') {
+            if (job.status === 'completed' || job.status === 'failed' || job.status==='dead') {
                 logger.warn({ jobId, status: job.status }, "Skipping already-terminal job — possible duplicate push");
                 continue;
             }
@@ -95,7 +100,10 @@ async function startWorker() {
 
             try {
                 if (!executeJob) {
-                    throw new Error(`No handler registered for job type: "${job.type}"`);
+                    //Configuration error 
+                    const err = new Error(`No handler registered for job type: "${job.type}"`);
+                    err.permanent=true;
+                    throw err;
                 }
 
                
@@ -113,6 +121,7 @@ async function startWorker() {
                 logger.info({ jobId, type: job.type }, "Job completed successfully");
 
             } catch (handlerError) {
+
                 const isRetryable = !handlerError.permanent
                                  && job.retry_count < job.max_retries;
 
