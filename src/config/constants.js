@@ -5,11 +5,12 @@ export const QUEUE_ROUTING = {
     'GENERATE_PDF':   'queue:compute',
     'TEST_CHAOS':     'queue:io',
 };
- // The sorted set key that holds delayed/retrying jobs.
-// Score = timestamp (ms) at which the job becomes eligible.
-export const DELAYED_QUEUE = 'queue:delayed';
  
-// Exponential backoff: base delay in milliseconds.
+export const DELAYED_QUEUE = 'queue:delayed';
+
+export const DEAD_QUEUE = 'queue:dead';
+ 
+
 
 export const RETRY_BASE_DELAY_MS = 10_000;
  

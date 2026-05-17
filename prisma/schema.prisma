@@ -16,14 +16,17 @@ model Job {
   
   created_at    DateTime  @default(now())
   started_at    DateTime? 
-  completed_at  DateTime? 
+  completed_at  DateTime?
+  dead_at       DateTime?
   
   retry_count   Int       @default(0)
   max_retries   Int       @default(3)
   next_retry_at DateTime?
   result_data   Json?
 
-  @@index([status])       
+  @@index([status])  
+  @@index([created_at])
+  @@index([next_retry_at])     
 }
 
 model SentEmail {
