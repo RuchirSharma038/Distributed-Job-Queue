@@ -10,7 +10,11 @@
     "workers:start": "pm2 start ecosystem.config.cjs",
     "workers:stop": "pm2 stop ecosystem.config.cjs",
     "workers:monit": "pm2 monit",
-    "workers:logs": "pm2 logs"
+    "workers:logs": "pm2 logs",
+    "queue:zombie-hunt": "node src/scripts/zombieHunter.js --execute",
+    "queue:zombie-hunt:dry": "node src/scripts/zombieHunter.js",
+    "queue:inspect-dead": "node src/scripts/replayDead.js",
+    "queue:replay-dead": "node src/scripts/replayDead.js --execute"
   },
   "keywords": [],
   "author": "",
