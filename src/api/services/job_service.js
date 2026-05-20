@@ -1,6 +1,7 @@
 import redis from "../../config/redis.js";
 import prisma from "../../config/database.js";
 import { QUEUE_ROUTING, DEAD_QUEUE } from "../../config/constants.js";
+import { logger } from "../../config/logger.js";
 
 const RESET_DATA = {
     status: 'queued',
@@ -12,7 +13,7 @@ const RESET_DATA = {
     completed_at: null,
 };
 
-export const createJobService = async (jobType, payload) => {
+export const createJobService = async (jobType, payload, runAt = null) => {
     //Segregrate by intensity according to QUEUE_ROUTING
 
     const targetQueue = QUEUE_ROUTING[jobType];
@@ -20,21 +21,39 @@ export const createJobService = async (jobType, payload) => {
     if (!targetQueue) {
         throw new Error(`Invalid Job Type: ${jobType}`);
     }
+    const isScheduled = runAt !== null;
+    const scheduledAt = isScheduled ? new Date(runAt) : null;
+    const initialStatus = isScheduled ? 'scheduled' : 'queued';
 
     //Write to postgres
     const job = await prisma.job.create({
         data: {
             type: jobType,
             payload: payload,
-            status: 'queued'
+            status: initialStatus,
+            scheduled_at: scheduledAt,
         }
     });
 
 
     //Write to redis
-    await redis.lpush(targetQueue, job.id);
+    if (isScheduled) {
 
-    console.log(`[Job Queued] ID: ${job.id} -> ${targetQueue}`);
+        await redis.zadd(DELAYED_QUEUE, scheduledAt.getTime(), job.id);
+
+        logger.info(
+            { jobId: job.id, type: jobType, scheduledAt: scheduledAt.toISOString() },
+            `[Job Scheduled] ID: ${job.id} → ${DELAYED_QUEUE} (runs at ${scheduledAt.toISOString()})`
+        );
+    } else {
+
+        await redis.lpush(targetQueue, job.id);
+
+        logger.info(
+            { jobId: job.id, type: jobType, queue: targetQueue },
+            `[Job Queued] ID: ${job.id} → ${targetQueue}`
+        );
+    }
 
     return job;
 

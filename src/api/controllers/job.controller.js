@@ -12,7 +12,7 @@ import { logger } from "../../config/logger.js";
 
 export const createJob = async (req, res) => {
     try {
-        const { jobType, payload } = req.body;
+        const { jobType, payload, runAt } = req.body;
         if (!jobType || !payload) {
             return res.status(400).json({ error: "Missing jobType or payload" });
 
@@ -23,12 +23,20 @@ export const createJob = async (req, res) => {
 
             return res.status(400).json({ error: validationError });
         }
-        const job = await createJobService(jobType, payload);
+        const runAtError = validateRunAt(runAt);
+        if (runAtError) {
+            return res.status(400).json({ error: runAtError });
+        }
+        const job = await createJobService(jobType, payload, runAt ?? null);
 
         res.status(202).json({
-            message: "Job accepted for processing",
+            message: isScheduled
+                ? `Job scheduled for ${new Date(runAt).toISOString()}`
+                : 'Job accepted for processing',
             jobId: job.id,
+            status: job.status,
             pollUrl: `/api/jobs/${job.id}`,
+            ...(isScheduled && { scheduledAt: new Date(runAt).toISOString() }),
         });
     } catch (err) {
         logger.error({ err: err.message }, "Queue Error in createJob controller");
@@ -54,6 +62,7 @@ export const getJobByID = async (req, res) => {
                 max_retries: true,
                 error_message: true,
                 result_data: true,
+                scheduled_at: true,
                 created_at: true,
                 started_at: true,
                 completed_at: true,
@@ -76,6 +85,7 @@ export const getJobByID = async (req, res) => {
             },
             timestamps: {
                 created: job.created_at,
+                scheduled: job.scheduled_at ?? null,
                 started: job.started_at ?? null,
                 completed: job.completed_at ?? null,
                 dead: job.dead_at ?? null,
@@ -83,6 +93,16 @@ export const getJobByID = async (req, res) => {
         }
 
         switch (job.status) {
+
+            case 'scheduled': {
+
+                const msUntilRun = new Date(job.scheduled_at).getTime() - Date.now();
+                response.scheduledAt = job.scheduled_at;
+                response.runsInMs = Math.max(0, msUntilRun);
+                response.pollAgainInMs = Math.min(msUntilRun, 10_000); // poll max every 10s
+                response.message = `Job is scheduled to run at ${job.scheduled_at.toISOString()}`;
+                break;
+            }
 
             case 'queued':
                 response.pollAgainInMs = 2000;
@@ -133,7 +153,7 @@ export const getJobByID = async (req, res) => {
         }
         return res.status(200).json(response);
     } catch (err) {
-       logger.error({ err: err.message, jobId: req.params.id }, "Job Fetch Error in controller");
+        logger.error({ err: err.message, jobId: req.params.id }, "Job Fetch Error in controller");
         res.status(500).json({ error: "Internal Server Erorr" });
     }
 };

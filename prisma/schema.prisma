@@ -12,7 +12,9 @@ model Job {
   type          String    
   payload       Json      
   status        String    @default("queued") 
-  error_message String?   
+  error_message String?  
+
+  scheduled_at  DateTime? 
   
   created_at    DateTime  @default(now())
   started_at    DateTime? 
@@ -26,7 +28,8 @@ model Job {
 
   @@index([status])  
   @@index([created_at])
-  @@index([next_retry_at])     
+  @@index([next_retry_at])
+  @@index([scheduled_at])     
 }
 
 model SentEmail {

@@ -23,5 +23,26 @@ export const validatePayload = (jobType, payload) => {
         }
     }
 
-    return null; 
+    return null;
+};
+
+const MIN_SCHEDULE_BUFFER_MS = 5_000;
+
+export const validateRunAt = (runAt) => {
+    if (runAt === undefined || runAt === null) {
+        return null; 
+    }
+
+    const parsed = new Date(runAt);
+
+    if (isNaN(parsed.getTime())) {
+        return `'runAt' is not a valid date. Use ISO 8601 format, e.g. "2025-01-20T09:00:00.000Z"`;
+    }
+
+    const minAllowed = new Date(Date.now() + MIN_SCHEDULE_BUFFER_MS);
+    if (parsed <= minAllowed) {
+        return `'runAt' must be at least 5 seconds in the future. Got: ${runAt}`;
+    }
+
+    return null;
 };
