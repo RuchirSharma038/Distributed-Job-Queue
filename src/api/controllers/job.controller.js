@@ -1,4 +1,9 @@
-import { validatePayload } from "../validators/jobValidators.js";
+import {
+    validatePayload,
+    validateRunAt,
+    validatePriority,
+} from "../validators/jobValidators.js";
+
 import {
     createJobService,
     replayDeadJobsService,
@@ -12,22 +17,25 @@ import { logger } from "../../config/logger.js";
 
 export const createJob = async (req, res) => {
     try {
-        const { jobType, payload, runAt } = req.body;
+        const { jobType, payload, runAt, priority } = req.body;
         if (!jobType || !payload) {
             return res.status(400).json({ error: "Missing jobType or payload" });
 
         }
-        const validationError = validatePayload(jobType, payload);
+        const payloadError = validatePayload(jobType, payload);
+        if (payloadError) return res.status(400).json({ error: payloadError });
 
-        if (validationError) {
-
-            return res.status(400).json({ error: validationError });
-        }
         const runAtError = validateRunAt(runAt);
-        if (runAtError) {
-            return res.status(400).json({ error: runAtError });
-        }
-        const job = await createJobService(jobType, payload, runAt ?? null);
+        if (runAtError) return res.status(400).json({ error: runAtError });
+
+        const priorityError = validatePriority(priority);
+        if (priorityError) return res.status(400).json({ error: priorityError });
+
+
+        const resolvedPriority = priority ?? DEFAULT_PRIORITY;
+        const job = await createJobService(jobType, payload, runAt ?? null, resolvedPriority);
+
+        const isScheduled = runAt != null;
 
         res.status(202).json({
             message: isScheduled
@@ -35,6 +43,7 @@ export const createJob = async (req, res) => {
                 : 'Job accepted for processing',
             jobId: job.id,
             status: job.status,
+            priority: resolvedPriority,
             pollUrl: `/api/jobs/${job.id}`,
             ...(isScheduled && { scheduledAt: new Date(runAt).toISOString() }),
         });
@@ -58,6 +67,7 @@ export const getJobByID = async (req, res) => {
                 id: true,
                 type: true,
                 status: true,
+                priority: true,
                 retry_count: true,
                 max_retries: true,
                 error_message: true,
@@ -68,6 +78,7 @@ export const getJobByID = async (req, res) => {
                 completed_at: true,
                 dead_at: true,
                 next_retry_at: true,
+
             }
         });
 
@@ -79,6 +90,7 @@ export const getJobByID = async (req, res) => {
             jobId: job.id,
             type: job.type,
             status: job.status,
+            priority: job.priority,
             retries: {
                 count: job.retry_count,
                 max: job.max_retries,

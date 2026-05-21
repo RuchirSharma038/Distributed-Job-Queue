@@ -1,3 +1,4 @@
+import { PRIORITIES } from "../../config/constants.js";
 // Define the exact required fields for each job type
 const jobSchemas = {
     'SEND_EMAIL': ['to', 'subject', 'body'],
@@ -30,7 +31,7 @@ const MIN_SCHEDULE_BUFFER_MS = 5_000;
 
 export const validateRunAt = (runAt) => {
     if (runAt === undefined || runAt === null) {
-        return null; 
+        return null;
     }
 
     const parsed = new Date(runAt);
@@ -42,6 +43,17 @@ export const validateRunAt = (runAt) => {
     const minAllowed = new Date(Date.now() + MIN_SCHEDULE_BUFFER_MS);
     if (parsed <= minAllowed) {
         return `'runAt' must be at least 5 seconds in the future. Got: ${runAt}`;
+    }
+
+    return null;
+};
+
+export const validatePriority = (priority) => {
+
+    if (priority === undefined || priority === null) return null;
+
+    if (!PRIORITIES.includes(priority)) {
+        return `Invalid priority '${priority}'. Must be one of: ${PRIORITIES.join(', ')}`;
     }
 
     return null;

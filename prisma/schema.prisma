@@ -14,6 +14,8 @@ model Job {
   status        String    @default("queued") 
   error_message String?  
 
+  priority      String    @default("default")
+
   scheduled_at  DateTime? 
   
   created_at    DateTime  @default(now())
@@ -26,7 +28,8 @@ model Job {
   next_retry_at DateTime?
   result_data   Json?
 
-  @@index([status])  
+  @@index([status])
+  @@index([priority])  
   @@index([created_at])
   @@index([next_retry_at])
   @@index([scheduled_at])     

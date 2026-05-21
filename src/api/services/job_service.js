@@ -1,6 +1,12 @@
 import redis from "../../config/redis.js";
 import prisma from "../../config/database.js";
-import { QUEUE_ROUTING, DEAD_QUEUE } from "../../config/constants.js";
+import {
+    QUEUE_ROUTING,
+    DELAYED_QUEUE,
+    DEAD_QUEUE,
+    DEFAULT_PRIORITY,
+    getPriorityQueue,
+} from "../../config/constants.js";
 import { logger } from "../../config/logger.js";
 
 const RESET_DATA = {
@@ -13,7 +19,7 @@ const RESET_DATA = {
     completed_at: null,
 };
 
-export const createJobService = async (jobType, payload, runAt = null) => {
+export const createJobService = async (jobType, payload, runAt = null, priority = DEFAULT_PRIORITY) => {
     //Segregrate by intensity according to QUEUE_ROUTING
 
     const targetQueue = QUEUE_ROUTING[jobType];
@@ -31,6 +37,7 @@ export const createJobService = async (jobType, payload, runAt = null) => {
             type: jobType,
             payload: payload,
             status: initialStatus,
+            priority,
             scheduled_at: scheduledAt,
         }
     });
@@ -47,10 +54,11 @@ export const createJobService = async (jobType, payload, runAt = null) => {
         );
     } else {
 
+        const targetQueue = getPriorityQueue(baseQueue, priority);
         await redis.lpush(targetQueue, job.id);
 
         logger.info(
-            { jobId: job.id, type: jobType, queue: targetQueue },
+            { jobId: job.id, type: jobType, priority, queue: targetQueue },
             `[Job Queued] ID: ${job.id} → ${targetQueue}`
         );
     }
@@ -69,7 +77,7 @@ export const replayDeadJobsService = async () => {
     for (const jobId of jobIds) {
         const job = await prisma.job.findUnique({
             where: { id: jobId },
-            select: { id: true, type: true, status: true }
+            select: { id: true, type: true, status: true, priority: true }
         });
 
         if (!job || job.status !== 'dead') {
@@ -77,11 +85,10 @@ export const replayDeadJobsService = async () => {
             continue;
         }
 
-        const targetQueue = QUEUE_ROUTING[job.type];
-        if (!targetQueue) {
-            skipped++;
-            continue;
-        }
+        const baseQueue = QUEUE_ROUTING[job.type];
+        const targetQueue = getPriorityQueue(baseQueue, job.priority ?? DEFAULT_PRIORITY);
+
+        if (!baseQueue) { skipped++; continue; }
 
         await prisma.job.update({
             where: { id: jobId },
@@ -102,13 +109,14 @@ export const replayDeadJobsService = async () => {
 export const replaySingleJobService = async (jobId) => {
     const job = await prisma.job.findUnique({
         where: { id: jobId },
-        select: { id: true, type: true, status: true }
+        select: { id: true, type: true, status: true, priority: true }
     });
 
     if (!job) return { notFound: true };
     if (job.status !== 'dead') return { wrongStatus: true, status: job.status };
 
-    const targetQueue = QUEUE_ROUTING[job.type];
+    const baseQueue = QUEUE_ROUTING[job.type];
+    const targetQueue = getPriorityQueue(baseQueue, job.priority ?? DEFAULT_PRIORITY);
 
     await prisma.job.update({ where: { id: jobId }, data: RESET_DATA });
     const pipeline = redis.multi();
