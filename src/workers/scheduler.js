@@ -4,6 +4,7 @@ import { logger } from "../config/logger.js";
 import { QUEUE_ROUTING, DELAYED_QUEUE } from "../config/constants.js";
 
 const POLL_INTERVAL_MS = 5_000; // Check every 5 seconds
+const TERMINAL_STATUSES = new Set(['completed', 'failed', 'dead']);
 
 async function promoteReadyJobs() {
     const nowMs = Date.now();
@@ -20,7 +21,7 @@ async function promoteReadyJobs() {
             // Fetch the job to find out which queue it belongs to.
             const job = await prisma.job.findUnique({
                 where: { id: jobId },
-                select: { id: true, type: true, status: true }
+                select: { id: true, type: true, status: true, scheduled_at: true, retry_count: true }
             });
 
             if (!job) {
@@ -30,7 +31,7 @@ async function promoteReadyJobs() {
             }
 
             // Safety check
-            if (job.status === 'failed' || job.status === 'completed' || job.status==='dead') {
+            if (TERMINAL_STATUSES.has(job.status)) {
                 logger.warn({ jobId, status: job.status }, "Delayed job is already terminal — removing from sorted set");
                 await redis.zrem(DELAYED_QUEUE, jobId);
                 continue;
@@ -44,16 +45,45 @@ async function promoteReadyJobs() {
                 continue;
             }
 
+
+            if (job.status === 'scheduled') {
+                await prisma.job.update({
+                    where: { id: jobId },
+                    data: { status: 'queued' },
+                });
+            } else if (job.status === 'retrying') {
+                await prisma.job.update({
+                    where: { id: jobId },
+                    data: { next_retry_at: null },
+                });
+            }
+
+
             // Atomic-ish promotion
-            
+
             await redis.lpush(targetQueue, jobId);
             await redis.zrem(DELAYED_QUEUE, jobId);
 
-            logger.info({ jobId, type: job.type, targetQueue }, "Job promoted from delayed to live queue");
+            if (job.status === 'scheduled') {
+                logger.info(
+                    { jobId, type: job.type, targetQueue, scheduledAt: job.scheduled_at },
+                    "Scheduler: promoted SCHEDULED job → live queue"
+                );
+            } else if (job.status === 'retrying') {
+                logger.info(
+                    { jobId, type: job.type, targetQueue, retryCount: job.retry_count },
+                    `Scheduler: promoted RETRY job (attempt ${job.retry_count}) → live queue`
+                );
+            } else {
+
+                logger.info(
+                    { jobId, type: job.type, targetQueue, status: job.status },
+                    "Scheduler: promoted job → live queue"
+                );
+            }
 
         } catch (err) {
-            // Don't let one bad job stop the rest from being promoted.
-            logger.error({ jobId, err: err.message }, "Error promoting delayed job — will retry on next poll");
+            logger.error({ jobId, err: err.message }, "Scheduler: error promoting job — will retry on next poll");
         }
     }
 }

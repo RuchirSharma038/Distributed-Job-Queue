@@ -22,79 +22,64 @@ async function ensureDirectory(dir) {
     }
 }
 
-const processPdf = (payload) => {
-    return new Promise((resolve, reject) => {
-        try {
+const processPdf = async (payload, jobId, log) => {
+    const { filename, invoiceData } = payload;
+    log.info({ filename }, "Starting PDF generation");
 
-            const { filename, invoiceData } = payload;
+    await ensureDirectory(OUTPUT_DIR);
 
-            jobLogger.info({ filename }, "Starting PDF generation");
+    const filePath = path.join(OUTPUT_DIR, filename);
+    const publicUrl = `/static/pdfs/${filename}`;
 
-            await ensureDirectory(OUTPUT_DIR);
+    //IDEMPOTENCY CHECK
+    if (await isFileValid(filePath)) {
+        log.info({ filename }, "Idempotency: valid file already exists — returning cached URL");
+        return { success: true, fileUrl: publicUrl, cached: true };
+    }
 
-            const filePath = path.join(OUTPUT_DIR, filename);
-            const publicUrl = `/static/pdfs/${filename}`;
+    //Generate the PDF
+    const doc = new PDFDocument({ margin: 50 });
+    const writeStream = fs.createWriteStream(filePath);
 
+    doc.pipe(writeStream);
 
-            // IDEMPOTENCY CHECK
+    doc.fontSize(25).font('Helvetica-Bold').text('INVOICE', { align: 'center' });
+    doc.moveDown(2);
 
-            if (await isFileValid(filePath)) {
-                jobLogger.info("Idempotency: Valid file already exists — returning cached URL");
-                return resolve({ success: true, fileUrl: publicUrl, cached: true });
-            }
+    doc.fontSize(14).font('Helvetica');
+    doc.text(`Order ID: ${invoiceData.orderId || 'N/A'}`);
+    doc.text(`Customer Name: ${invoiceData.customerName}`);
+    doc.text(`Date: ${new Date().toLocaleDateString()}`);
+    doc.moveDown(2);
 
+    doc.font('Helvetica-Bold').text('Items Purchased:');
+    doc.font('Helvetica');
+    if (invoiceData.items && Array.isArray(invoiceData.items)) {
+        invoiceData.items.forEach(item => {
+            doc.text(`- ${item.name}: $${item.price}`);
+        });
+    }
 
-            // Generate the PDF
+    doc.moveDown();
+    doc.font('Helvetica-Bold').text(`Total Amount: $${invoiceData.totalAmount}`);
 
-            const doc = new PDFDocument({ margin: 50 });
-            const writeStream = fs.createWriteStream(filePath);
+    doc.end();
 
-            doc.pipe(writeStream);
+    // Wait for the stream to finish
+    await new Promise((resolve, reject) => {
+        writeStream.on('finish', resolve);
 
-            doc.fontSize(25).font('Helvetica-Bold').text('INVOICE', { align: 'center' });
-            doc.moveDown(2);
+        writeStream.on('error', async (err) => {
 
-            doc.fontSize(14).font('Helvetica');
-            doc.text(`Order ID: ${invoiceData.orderId || 'N/A'}`);
-            doc.text(`Customer Name: ${invoiceData.customerName}`);
-            doc.text(`Date: ${new Date().toLocaleDateString()}`);
-            doc.moveDown(2);
-
-            doc.font('Helvetica-Bold').text('Items Purchased:');
-            doc.font('Helvetica');
-            if (invoiceData.items && Array.isArray(invoiceData.items)) {
-                invoiceData.items.forEach(item => {
-                    doc.text(`- ${item.name}: $${item.price}`);
-                });
-            }
-
-            doc.moveDown();
-            doc.font('Helvetica-Bold').text(`Total Amount: $${invoiceData.totalAmount}`);
-
-            doc.end();
-
-            writeStream.on('finish', () => {
-                console.log(`[PDF Handler] Success — saved to ${filePath}`);
-                resolve({ success: true, fileUrl: publicUrl, cached: false });
-            });
-
-            writeStream.on('error', (err) => {
-                // Clean up the partial file so the next retry starts fresh
-
-                try { await fsp.unlink(filePath); } catch { /* ignore */ }
-                jobLogger.error({ err: err.message }, "Stream error during PDF write");
-                reject(err);
-            });
-
-        } catch (error) {
-            jobLogger.error({ err: error.message }, "PDF generation pipeline failed");
-
-            if (error instanceof TypeError) {
-                error.permanent = true;
-            }
-            reject(error);
-        }
+            try { await fsp.unlink(filePath); } catch { /* ignore — file may not exist */ }
+            reject(err);
+        });
     });
+    log.info({ filePath, publicUrl }, "PDF generation completed");   
+
+    return { success: true, fileUrl: publicUrl, cached: false };
+
+
 };
 
 export default processPdf;

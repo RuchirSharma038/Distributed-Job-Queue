@@ -3,9 +3,7 @@ import * as cheerio from "cheerio";
 
 const processScrapper = async (payload) => {
     const { url, targetSelector } = payload;
-    console.log(`[Scraper Handler] Fetching data from: ${url}`);
-
-
+    log.info({ url, targetSelector }, "Scraper handler started");
 
     try {
         // Fake the User-Agent
@@ -21,10 +19,12 @@ const processScrapper = async (payload) => {
             timeout: 10000
         };
 
+        log.info({ url }, "Fetching page");
+
         // Fetch the raw HTML
         const response = await axios.get(url, config);
 
-        //  Load HTML into Cheerio (This acts exactly like jQuery)
+        //  Load HTML into Cheerio 
         const $ = cheerio.load(response.data);
 
         //  Extract the data using the CSS selector
@@ -33,9 +33,10 @@ const processScrapper = async (payload) => {
         if (!rawText) {
             throw new Error(`Selector '${targetSelector}' found no data on the page.`);
         }
+        log.info({ selector: targetSelector, rawText }, "Selector matched");
 
         //  Data Sanitization 
-        // Websites return prices as "£53.74" or "$19.99". We need a clean JavaScript Number.
+
         // This regex extracts only digits and the decimal point.
         const priceMatch = rawText.match(/[\d.]+/);
 
@@ -44,19 +45,21 @@ const processScrapper = async (payload) => {
         }
 
         const cleanPrice = parseFloat(priceMatch[0]);
-        console.log(`[Scraper Handler] Success! Found Price: ${cleanPrice}`);
+       
 
-        //  Return the clean data to the main worker loop
-        return {
+
+        const result = {
             success: true,
             extractedText: rawText,
             numericValue: cleanPrice,
             scrapedAt: new Date().toISOString()
         };
+        log.info({ numericValue: cleanPrice, extractedText: rawText }, "Scraper handler completed");
+
+        return result;
 
     } catch (error) {
-        console.error(`[Scraper Handler] Failed: ${error.message}`);
-        // Throw the error so the main worker.js updates Postgres to 'failed'
+        log.error({ err: error.message, url }, "Scraper handler failed");
         throw error;
     }
 }

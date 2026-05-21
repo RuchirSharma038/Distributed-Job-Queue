@@ -15,18 +15,19 @@ function getOutputPath(baseName, operation) {
 
 async function fileExists(filePath) {
     try {
-        const stats = await fs.access(filePath);
+        const stats = await fs.stat(filePath);
+
         return stats.size > 0;
     } catch {
         return false;
     }
 }
 
-const processImage = async (payload) => {
+const processImage = async (payload, jobId, log) => {
     const { inputPath, filename, operations } = payload;
     const baseName = path.parse(filename).name;
 
-    jobLogger.info({ filename, operations }, "Starting image processing");
+    log.info({ filename, operations }, "Starting image processing");
 
     await fs.mkdir(OUTPUT_DIR, { recursive: true });
 
@@ -54,7 +55,7 @@ const processImage = async (payload) => {
     }
 
 
-    // We have work to do — check the source file exists
+    // Source file check
 
     try {
         await fs.access(inputPath);
@@ -71,7 +72,7 @@ const processImage = async (payload) => {
     }
 
 
-    // Process only the pending operations
+    // Process the pending operations
 
     const newResults = {};
 
@@ -110,9 +111,9 @@ const processImage = async (payload) => {
 
         try {
             await fs.unlink(inputPath);
-            jobLogger.info("Cleaned up source file");
+            log.info("Cleaned up source file");
         } catch (cleanupError) {
-            jobLogger.warn({ err: cleanupError.message }, "Failed to delete source file, but job succeeded. Proceeding.");
+            log.warn({ err: cleanupError.message }, "Failed to delete source file, but job succeeded. Proceeding.");
         }
 
         return {

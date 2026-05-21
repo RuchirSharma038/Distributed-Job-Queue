@@ -1,15 +1,16 @@
 import nodemailer from 'nodemailer';
 import prisma from '../../config/database.js';
 import redis from '../../config/redis.js';
+//import { logger } from '../../config/logger.js';
 
 const SENT_KEY_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
 
 let transporter = null;
 
-async function getTransporter() {
+async function getTransporter(log) {
     if (transporter) return transporter;
 
-    // Ethereal auto-creates a test account — great for dev, zero config
+
     const testAccount = await nodemailer.createTestAccount();
 
     transporter = nodemailer.createTransport({
@@ -22,7 +23,7 @@ async function getTransporter() {
         },
     });
 
-    logger.info({ user: testAccount.user }, "Ethereal SMTP initialized");
+    log.info({ account: testAccount.user }, "Ethereal SMTP initialized");
     return transporter;
 }
 
@@ -31,8 +32,12 @@ async function getTransporter() {
 
 
 async function isAlreadySent(jobId) {
-    const val = await redis.get(`sent_email:${jobId}`);
-    return val !== null;
+    try {
+        const val = await redis.get(`sent_email:${jobId}`);
+        return val !== null;
+    } catch {
+        return false;
+    }
 }
 
 async function markAsSent(jobId) {
@@ -43,26 +48,23 @@ async function markAsSent(jobId) {
 // Handler
 
 
-const processEmail = async (payload, jobId) => {
+const processEmail = async (payload, jobId, log) => {
 
-    const jobId = jobLogger.bindings().job_id;
+    //const jobId = jobLogger.bindings().job_id;
 
     const { to, subject, body } = payload;
-
-    jobLogger.info({ to }, "Initiating email send sequence");
-
+    log.info({ to, subject }, "Email handler started");
 
     // IDEMPOTENCY CHECK
-
     if (await isAlreadySent(jobId)) {
-        jobLogger.warn("Idempotency triggered: email already sent. Bypassing SMTP.");
+        log.info({ jobId }, "Idempotency: email already sent on a previous attempt — skipping");
         return { success: true, cached: true, message: 'Email already sent on a previous attempt' };
     }
 
 
     // Send the email
 
-    const smtp = await getTransporter();
+    const smtp = await getTransporter(log);
 
     const info = await smtp.sendMail({
         from: '"Job Queue System" <noreply@jobqueue.dev>',
@@ -76,7 +78,7 @@ const processEmail = async (payload, jobId) => {
     await markAsSent(jobId);
 
     const previewUrl = nodemailer.getTestMessageUrl(info);
-jobLogger.info({ messageId: info.messageId, previewUrl }, "Email dispatched and marked as sent");
+    log.info({ messageId: info.messageId, previewUrl }, "Email dispatched and marked as sent");
 
     return {
         success: true,

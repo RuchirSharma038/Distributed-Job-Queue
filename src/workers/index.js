@@ -6,6 +6,9 @@ import { QUEUE_ROUTING, DELAYED_QUEUE, RETRY_BASE_DELAY_MS, DEAD_QUEUE } from ".
 
 const QUEUE_NAME = process.env.QUEUE_NAME || "queue:io";
 
+function createJobLogger(job) {
+    return logger.child({ jobId: job.id, type: job.type });
+}
 
 // Retry scheduler
 
@@ -14,16 +17,16 @@ function calcNextRetryTimestamp(retryCount) {
     return Date.now() + delayMs;
 }
 
-async function scheduleRetry(job, handlerError) {
+async function scheduleRetry(job, handlerError, log) {
     const newRetryCount = job.retry_count + 1;
-    const nextRetryAt   = new Date(calcNextRetryTimestamp(newRetryCount));
+    const nextRetryAt = new Date(calcNextRetryTimestamp(newRetryCount));
 
     //  Update Postgres: mark retrying, store the error, increment count
     await prisma.job.update({
         where: { id: job.id },
         data: {
-            status:        'retrying',
-            retry_count:   newRetryCount,
+            status: 'retrying',
+            retry_count: newRetryCount,
             next_retry_at: nextRetryAt,
             error_message: handlerError.message,
         }
@@ -32,19 +35,21 @@ async function scheduleRetry(job, handlerError) {
     //  Push into Redis Sorted Set (score = ms timestamp)
     await redis.zadd(DELAYED_QUEUE, nextRetryAt.getTime(), job.id);
 
-    logger.warn(
-        { jobId: job.id, type: job.type, attempt: newRetryCount, retryAt: nextRetryAt },
+    log.warn(
+        { attempt: newRetryCount, max: job.max_retries, retryAt: nextRetryAt },
         `Job failed — scheduled retry ${newRetryCount}/${job.max_retries}`
     );
 }
+
+
 
 async function markFailed(job, handlerError) {
     await prisma.job.update({
         where: { id: job.id },
         data: {
-            status:        'failed',
+            status: 'dead',
             error_message: handlerError.message,
-            dead_at:       new Date(),
+            dead_at: new Date(),
         }
     });
 
@@ -81,9 +86,12 @@ async function startWorker() {
                 continue;
             }
 
-            // Guard: if the job is already completed or permanently failed
-            if (job.status === 'completed' || job.status === 'failed' || job.status==='dead') {
-                logger.warn({ jobId, status: job.status }, "Skipping already-terminal job — possible duplicate push");
+            const log = createJobLogger(job);
+            log.info({ queue: queueName }, "Job picked up");
+
+
+            if (job.status === 'completed' || job.status === 'failed' || job.status === 'dead') {
+                log.warn({ status: job.status }, "Skipping terminal job — possible duplicate push");
                 continue;
             }
 
@@ -93,42 +101,42 @@ async function startWorker() {
                 data: { status: 'running', started_at: new Date() }
             });
 
-           
+
             // Execution + retry fork
-           
+
             const executeJob = handlers[job.type];
 
             try {
                 if (!executeJob) {
                     //Configuration error 
                     const err = new Error(`No handler registered for job type: "${job.type}"`);
-                    err.permanent=true;
+                    err.permanent = true;
                     throw err;
                 }
 
-               
-                const jobResult = await executeJob(job.payload, job.id);
+
+                const jobResult = await executeJob(job.payload, job.id, log);
 
                 // Success path
                 await prisma.job.update({
                     where: { id: jobId },
                     data: {
-                        status:       'completed',
+                        status: 'completed',
                         completed_at: new Date(),
-                        result_data:  jobResult ?? {},
+                        result_data: jobResult ?? {},
                     }
                 });
-                logger.info({ jobId, type: job.type }, "Job completed successfully");
+                log.info("Job completed successfully");
 
             } catch (handlerError) {
 
-                const isRetryable = !handlerError.permanent
-                                 && job.retry_count < job.max_retries;
-
-                if (isRetryable) {
-                    await scheduleRetry(job, handlerError);
+                if (handlerError.permanent) {
+                    log.warn({ error: handlerError.message }, "Permanent error — skipping retries, sending to DLQ");
+                    await markDead(job, handlerError, log);
+                } else if (job.retry_count < job.max_retries) {
+                    await scheduleRetry(job, handlerError, log);
                 } else {
-                    await markFailed(job, handlerError);
+                    await markFailed(job, handlerError, log);
                 }
             }
 
