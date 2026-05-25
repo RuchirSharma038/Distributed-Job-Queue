@@ -2,27 +2,62 @@ import redis from "../config/redis.js";
 import prisma from "../config/database.js";
 import { logger } from "../config/logger.js";
 import { handlers } from "./handlers/handlerMap.js";
-import { QUEUE_ROUTING, DELAYED_QUEUE, RETRY_BASE_DELAY_MS, DEAD_QUEUE } from "../config/constants.js";
+import {
+    DELAYED_QUEUE,
+    DEAD_QUEUE,
+    RETRY_BASE_DELAY_MS,
+    IO_BRPOP_QUEUES,
+    COMPUTE_BRPOP_QUEUES,
+    getPriorityQueue,
+    QUEUE_ROUTING,
+    DEFAULT_PRIORITY,
+} from "../config/constants.js";
+import { JOB_UPDATES_CHANNEL } from "../config/redisSubscriber.js";
 
-const QUEUE_NAME = process.env.QUEUE_NAME || "queue:io";
+const WORKER_TYPE = process.env.WORKER_TYPE || 'io';
+const LISTEN_QUEUES = WORKER_TYPE === 'compute' ? COMPUTE_BRPOP_QUEUES : IO_BRPOP_QUEUES;
 
-function createJobLogger(job) {
-    return logger.child({ jobId: job.id, type: job.type });
+// Redis Pub/Sub publisher
+
+async function publishJobEvent(job, extraFields = {}) {
+    try {
+        const event = {
+            jobId: job.id,
+            type: job.type,
+            status: job.status,
+            priority: job.priority ?? DEFAULT_PRIORITY,
+            retries: job.retry_count ?? 0,
+            timestamp: new Date().toISOString(),
+            ...extraFields,
+        };
+
+        await redis.publish(JOB_UPDATES_CHANNEL, JSON.stringify(event));
+    } catch (err) {
+        
+        logger.warn({ err: err.message, jobId: job.id }, 'Failed to publish job event — dashboard may miss this update');
+    }
 }
 
-// Retry scheduler
+
+// Child logger
+
+
+function createJobLogger(job) {
+    return logger.child({ jobId: job.id, type: job.type, priority: job.priority });
+}
+
+
+// Retry + DLQ helpers
 
 function calcNextRetryTimestamp(retryCount) {
-    const delayMs = RETRY_BASE_DELAY_MS * Math.pow(2, retryCount - 1);
-    return Date.now() + delayMs;
+    return Date.now() + RETRY_BASE_DELAY_MS * Math.pow(2, retryCount - 1);
 }
 
 async function scheduleRetry(job, handlerError, log) {
     const newRetryCount = job.retry_count + 1;
     const nextRetryAt = new Date(calcNextRetryTimestamp(newRetryCount));
 
-    //  Update Postgres: mark retrying, store the error, increment count
-    await prisma.job.update({
+    const updated = await prisma.job.update({
         where: { id: job.id },
         data: {
             status: 'retrying',
@@ -32,8 +67,13 @@ async function scheduleRetry(job, handlerError, log) {
         }
     });
 
-    //  Push into Redis Sorted Set (score = ms timestamp)
     await redis.zadd(DELAYED_QUEUE, nextRetryAt.getTime(), job.id);
+
+    // Publish
+    await publishJobEvent(updated, {
+        error: handlerError.message,
+        nextRetryAt: nextRetryAt.toISOString(),
+    });
 
     log.warn(
         { attempt: newRetryCount, max: job.max_retries, retryAt: nextRetryAt },
@@ -41,84 +81,67 @@ async function scheduleRetry(job, handlerError, log) {
     );
 }
 
-
-
-async function markFailed(job, handlerError) {
-    await prisma.job.update({
+async function markDead(job, handlerError, log) {
+    const updated = await prisma.job.update({
         where: { id: job.id },
-        data: {
-            status: 'dead',
-            error_message: handlerError.message,
-            dead_at: new Date(),
-        }
+        data: { status: 'dead', dead_at: new Date(), error_message: handlerError.message }
     });
 
-    //Push to Dead Queue
     await redis.lpush(DEAD_QUEUE, job.id);
+    await publishJobEvent(updated, { error: handlerError.message });
 
-    logger.error(
-        { jobId: job.id, type: job.type, retries: job.retry_count },
-        `Job moved to Dead Letter Queue after ${job.retry_count} retries: ${handlerError.message}`
+    log.error(
+        { retries: job.retry_count, error: handlerError.message },
+        `Job moved to Dead Letter Queue after ${job.retry_count} retries`
     );
 }
 
 
 // Main worker loop
 
-
 async function startWorker() {
-    logger.info({ queue: QUEUE_NAME, pid: process.pid }, "Worker started");
+    logger.info({ workerType: WORKER_TYPE, queues: LISTEN_QUEUES, pid: process.pid }, "Worker started");
 
     while (true) {
         try {
-            // BRPOP blocks until a job is available
-            const result = await redis.brpop(QUEUE_NAME, 0);
+            const result = await redis.brpop(...LISTEN_QUEUES, 0);
             if (!result) continue;
 
-            const [queueName, jobId] = result;
-            logger.info({ jobId, queue: queueName }, "Job picked up from queue");
-
-            // Fetch the authoritative record from Postgres.
+            const [pickedQueue, jobId] = result;
             const job = await prisma.job.findUnique({ where: { id: jobId } });
 
             if (!job) {
-                logger.error({ jobId }, "Job ID found in Redis but missing from DB — skipping");
+                logger.error({ jobId }, "Job ID in Redis but not in DB — skipping");
                 continue;
             }
 
             const log = createJobLogger(job);
-            log.info({ queue: queueName }, "Job picked up");
+            log.info({ queue: pickedQueue }, "Job picked up");
 
-
-            if (job.status === 'completed' || job.status === 'failed' || job.status === 'dead') {
+            if (['completed', 'failed', 'dead'].includes(job.status)) {
                 log.warn({ status: job.status }, "Skipping terminal job — possible duplicate push");
                 continue;
             }
 
-            // Mark as running
-            await prisma.job.update({
+            // Publish running
+            const runningJob = await prisma.job.update({
                 where: { id: jobId },
                 data: { status: 'running', started_at: new Date() }
             });
-
-
-            // Execution + retry fork
+            await publishJobEvent(runningJob);
 
             const executeJob = handlers[job.type];
 
             try {
                 if (!executeJob) {
-                    //Configuration error 
                     const err = new Error(`No handler registered for job type: "${job.type}"`);
                     err.permanent = true;
                     throw err;
                 }
 
-
                 const jobResult = await executeJob(job.payload, job.id, log);
 
-                // Success path
-                await prisma.job.update({
+                const completedJob = await prisma.job.update({
                     where: { id: jobId },
                     data: {
                         status: 'completed',
@@ -126,22 +149,24 @@ async function startWorker() {
                         result_data: jobResult ?? {},
                     }
                 });
+
+                // Publish result
+                await publishJobEvent(completedJob, { result: jobResult });
                 log.info("Job completed successfully");
 
             } catch (handlerError) {
-
                 if (handlerError.permanent) {
-                    log.warn({ error: handlerError.message }, "Permanent error — skipping retries, sending to DLQ");
+                    log.warn({ error: handlerError.message }, "Permanent error — sending to DLQ");
                     await markDead(job, handlerError, log);
                 } else if (job.retry_count < job.max_retries) {
                     await scheduleRetry(job, handlerError, log);
                 } else {
-                    await markFailed(job, handlerError, log);
+                    await markDead(job, handlerError, log);
                 }
             }
 
         } catch (redisError) {
-            logger.error({ err: redisError.message }, "Redis connection error — backing off 1s");
+            logger.error({ err: redisError.message }, "Redis error — backing off 1s");
             await new Promise(resolve => setTimeout(resolve, 1000));
         }
     }

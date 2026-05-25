@@ -1,5 +1,5 @@
 import { PRIORITIES } from "../../config/constants.js";
-// Define the exact required fields for each job type
+
 const jobSchemas = {
     'SEND_EMAIL': ['to', 'subject', 'body'],
     'SCRAPE_WEBSITE': ['url', 'targetSelector'],
