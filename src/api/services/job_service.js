@@ -43,7 +43,7 @@ export const createJobService = async (jobType, payload, runAt = null, priority 
     });
 
 
-    //Write to redis
+
     if (isScheduled) {
 
         await redis.zadd(DELAYED_QUEUE, scheduledAt.getTime(), job.id);
