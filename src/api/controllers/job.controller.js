@@ -4,6 +4,7 @@ import {
     validatePriority,
 } from "../validators/jobValidators.js";
 
+import { DEFAULT_PRIORITY } from "../../config/constants.js";
 import {
     createJobService,
     replayDeadJobsService,
@@ -147,10 +148,6 @@ export const getJobByID = async (req, res) => {
                 break;
             }
 
-            case 'failed':
-                response.error = job.error_message;
-                response.message = 'Job failed permanently';
-                break;
 
             case 'dead':
                 response.error = job.error_message;

@@ -22,9 +22,9 @@ const RESET_DATA = {
 export const createJobService = async (jobType, payload, runAt = null, priority = DEFAULT_PRIORITY) => {
     //Segregrate by intensity according to QUEUE_ROUTING
 
-    const targetQueue = QUEUE_ROUTING[jobType];
+    const baseQueue = QUEUE_ROUTING[jobType];
 
-    if (!targetQueue) {
+    if (!baseQueue) {
         throw new Error(`Invalid Job Type: ${jobType}`);
     }
     const isScheduled = runAt !== null;
