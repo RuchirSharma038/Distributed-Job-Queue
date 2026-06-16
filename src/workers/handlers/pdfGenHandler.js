@@ -1,5 +1,5 @@
 import PDFDocument from 'pdfkit';
-import fs from 'fs';
+import fs, { rename } from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
 
@@ -29,6 +29,7 @@ const processPdf = async (payload, jobId, log) => {
     await ensureDirectory(OUTPUT_DIR);
 
     const filePath = path.join(OUTPUT_DIR, filename);
+    const tempPath = `${filePath}.tmp`;
     const publicUrl = `/static/pdfs/${filename}`;
 
     //IDEMPOTENCY CHECK
@@ -39,7 +40,7 @@ const processPdf = async (payload, jobId, log) => {
 
     //Generate the PDF
     const doc = new PDFDocument({ margin: 50 });
-    const writeStream = fs.createWriteStream(filePath);
+    const writeStream = fs.createWriteStream(tempPath);
 
     doc.pipe(writeStream);
 
@@ -67,15 +68,24 @@ const processPdf = async (payload, jobId, log) => {
 
     // Wait for the stream to finish
     await new Promise((resolve, reject) => {
-        writeStream.on('finish', resolve);
+        writeStream.on('finish', async () => {
+            try {
+                await fsp.rename(tempPath, filePath);
+                resolve();
+
+            } catch (renameErr) {
+                reject(renameErr);
+            }
+        });
 
         writeStream.on('error', async (err) => {
 
-            try { await fsp.unlink(filePath); } catch { /* ignore — file may not exist */ }
+            try { await fsp.unlink(tempPath); } catch { /* ignore */ }
+            log.error({ err: err.message }, "Stream error during PDF write");
             reject(err);
         });
     });
-    log.info({ filePath, publicUrl }, "PDF generation completed");   
+    log.info({ filePath, publicUrl }, "PDF generation completed");
 
     return { success: true, fileUrl: publicUrl, cached: false };
 
