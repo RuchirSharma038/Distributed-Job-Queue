@@ -17,6 +17,10 @@ import { JOB_UPDATES_CHANNEL } from "../config/redisSubscriber.js";
 const WORKER_TYPE = process.env.WORKER_TYPE || 'io';
 const LISTEN_QUEUES = WORKER_TYPE === 'compute' ? COMPUTE_BRPOP_QUEUES : IO_BRPOP_QUEUES;
 
+const CONCURRENCY = process.env.WORKER_CONCURRENCY
+    ? parseInt(process.env.WORKER_CONCURRENCY)
+    : WORKER_TYPE === 'io' ? 10 : 1;
+
 // Redis Pub/Sub publisher
 
 async function publishJobEvent(job, extraFields = {}) {
@@ -33,7 +37,7 @@ async function publishJobEvent(job, extraFields = {}) {
 
         await redis.publish(JOB_UPDATES_CHANNEL, JSON.stringify(event));
     } catch (err) {
-        
+
         logger.warn({ err: err.message, jobId: job.id }, 'Failed to publish job event — dashboard may miss this update');
     }
 }
@@ -96,6 +100,76 @@ async function markDead(job, handlerError, log) {
     );
 }
 
+async function processOneJob() {
+    const result = await redis.brpop(...LISTEN_QUEUES, 0);
+    if (!result) return;
+    const [pickedQueue, jobId] = result;
+    const job = await prisma.job.findUnique({ where: { id: jobId } });
+
+    if (!job) {
+        logger.error({ jobId }, "Job ID in Redis but not in DB — skipping");
+        return;
+    }
+
+    const log = createJobLogger(job);
+    log.info({ queue: pickedQueue }, "Job picked up");
+
+    if (['completed', 'failed', 'dead'].includes(job.status)) {
+        log.warn({ status: job.status }, "Skipping terminal job — possible duplicate push");
+        return;
+    }
+
+    // Publish running
+    const runningJob = await prisma.job.update({
+        where: { id: jobId },
+        data: { status: 'running', started_at: new Date() }
+    });
+    await publishJobEvent(runningJob);
+
+    const executeJob = handlers[job.type];
+
+    try {
+        if (!executeJob) {
+            const err = new Error(`No handler registered for job type: "${job.type}"`);
+            err.permanent = true;
+            throw err;
+        }
+
+        const jobResult = await executeJob(job.payload, job.id, log);
+
+        const completedJob = await prisma.job.update({
+            where: { id: jobId },
+            data: {
+                status: 'completed',
+                completed_at: new Date(),
+                result_data: jobResult ?? {},
+            }
+        });
+
+        // Publish result
+        await publishJobEvent(completedJob, { result: jobResult });
+        log.info("Job completed successfully");
+
+    } catch (handlerError) {
+        try {
+            if (handlerError.permanent) {
+                await markDead(job, handlerError, log);
+            } else if (job.retry_count < job.max_retries) {
+                await scheduleRetry(job, handlerError, log);
+            } else {
+                await markDead(job, handlerError, log);
+            }
+        } catch (recoveryError) {
+            logger.error(
+                { jobId: job.id, originalError: handlerError.message, recoveryError: recoveryError.message },
+                "CRITICAL: failed to record job failure — recovery mechanism itself threw. Job will rely on zombie hunter for eventual recovery."
+            );
+        }
+    }
+
+
+
+}
 
 // Main worker loop
 
@@ -103,72 +177,9 @@ async function startWorker() {
     logger.info({ workerType: WORKER_TYPE, queues: LISTEN_QUEUES, pid: process.pid }, "Worker started");
 
     while (true) {
-        try {
-            const result = await redis.brpop(...LISTEN_QUEUES, 0);
-            if (!result) continue;
-
-            const [pickedQueue, jobId] = result;
-            const job = await prisma.job.findUnique({ where: { id: jobId } });
-
-            if (!job) {
-                logger.error({ jobId }, "Job ID in Redis but not in DB — skipping");
-                continue;
-            }
-
-            const log = createJobLogger(job);
-            log.info({ queue: pickedQueue }, "Job picked up");
-
-            if (['completed', 'failed', 'dead'].includes(job.status)) {
-                log.warn({ status: job.status }, "Skipping terminal job — possible duplicate push");
-                continue;
-            }
-
-            // Publish running
-            const runningJob = await prisma.job.update({
-                where: { id: jobId },
-                data: { status: 'running', started_at: new Date() }
-            });
-            await publishJobEvent(runningJob);
-
-            const executeJob = handlers[job.type];
-
-            try {
-                if (!executeJob) {
-                    const err = new Error(`No handler registered for job type: "${job.type}"`);
-                    err.permanent = true;
-                    throw err;
-                }
-
-                const jobResult = await executeJob(job.payload, job.id, log);
-
-                const completedJob = await prisma.job.update({
-                    where: { id: jobId },
-                    data: {
-                        status: 'completed',
-                        completed_at: new Date(),
-                        result_data: jobResult ?? {},
-                    }
-                });
-
-                // Publish result
-                await publishJobEvent(completedJob, { result: jobResult });
-                log.info("Job completed successfully");
-
-            } catch (handlerError) {
-                if (handlerError.permanent) {
-                    log.warn({ error: handlerError.message }, "Permanent error — sending to DLQ");
-                    await markDead(job, handlerError, log);
-                } else if (job.retry_count < job.max_retries) {
-                    await scheduleRetry(job, handlerError, log);
-                } else {
-                    await markDead(job, handlerError, log);
-                }
-            }
-
-        } catch (redisError) {
-            logger.error({ err: redisError.message }, "Redis error — backing off 1s");
-            await new Promise(resolve => setTimeout(resolve, 1000));
-        }
+        await Promise.all(
+            Array.from({ length: CONCURRENCY }, () => processOneJob())
+        );
     }
 }
 

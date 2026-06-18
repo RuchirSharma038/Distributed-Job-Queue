@@ -42,7 +42,7 @@ const processImage = async (payload, jobId, log) => {
         if (await fileExists(outputPath)) {
             // Already done on a previous attempt — include in results
             existingResults[op] = `/processed/${path.basename(outputPath)}`;
-            jobLogger.info({ operation: op }, "Idempotency: Output already exists and is valid, skipping");
+            log.info({ operation: op }, "Idempotency: Output already exists and is valid, skipping");
         } else {
             pendingOperations.push(op);
         }
@@ -50,7 +50,7 @@ const processImage = async (payload, jobId, log) => {
 
     // All operations already completed — nothing to do
     if (pendingOperations.length === 0) {
-        jobLogger.info("All outputs already exist — returning cached results");
+        log.info("All outputs already exist — returning cached results");
         return { success: true, generatedFiles: existingResults };
     }
 
@@ -62,7 +62,7 @@ const processImage = async (payload, jobId, log) => {
     } catch {
 
         if (Object.keys(existingResults).length > 0) {
-            jobLogger.warn("Source gone but partial results exist — returning what we have");
+            log.warn("Source gone but partial results exist — returning what we have");
             return { success: true, generatedFiles: existingResults };
         }
 
@@ -122,7 +122,7 @@ const processImage = async (payload, jobId, log) => {
         };
 
     } catch (error) {
-        jobLogger.error({ err: error.message }, "Image processing pipeline failed");
+        log.error({ err: error.message }, "Image processing pipeline failed");
         throw error;
     }
 };

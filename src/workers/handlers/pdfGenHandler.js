@@ -57,7 +57,7 @@ const processPdf = async (payload, jobId, log) => {
     doc.font('Helvetica');
     if (invoiceData.items && Array.isArray(invoiceData.items)) {
         invoiceData.items.forEach(item => {
-            doc.text(`- ${item.name}: $${item.price}`);
+            doc.text(`- ${item.name}: $${item.price}`, { lineBreak: true });
         });
     }
 
