@@ -21,6 +21,9 @@ const CONCURRENCY = process.env.WORKER_CONCURRENCY
     ? parseInt(process.env.WORKER_CONCURRENCY)
     : WORKER_TYPE === 'io' ? 10 : 1;
 
+//  Redis connection for listening 
+const redisListener = redis.duplicate();
+
 // Redis Pub/Sub publisher
 
 async function publishJobEvent(job, extraFields = {}) {
@@ -100,10 +103,7 @@ async function markDead(job, handlerError, log) {
     );
 }
 
-async function processOneJob() {
-    const result = await redis.brpop(...LISTEN_QUEUES, 0);
-    if (!result) return;
-    const [pickedQueue, jobId] = result;
+async function processOneJob(pickedQueue, jobId) {
     const job = await prisma.job.findUnique({ where: { id: jobId } });
 
     if (!job) {
@@ -173,13 +173,39 @@ async function processOneJob() {
 
 // Main worker loop
 
+let inFlight = 0;
+
 async function startWorker() {
-    logger.info({ workerType: WORKER_TYPE, queues: LISTEN_QUEUES, pid: process.pid }, "Worker started");
+    logger.info({ workerType: WORKER_TYPE, queues: LISTEN_QUEUES, pid: process.pid, concurrency: CONCURRENCY }, "Worker started");
 
     while (true) {
-        await Promise.all(
-            Array.from({ length: CONCURRENCY }, () => processOneJob())
-        );
+        if (inFlight >= CONCURRENCY) {
+            await new Promise(resolve => setTimeout(resolve, 50));
+            continue;
+        }
+
+        try {
+            // Wait up to 1 second 
+            const result = await redisListener.brpop(...LISTEN_QUEUES, 1);
+            if (!result) continue;
+
+            const [pickedQueue, jobId] = result;
+            
+            inFlight++;
+            
+            // Fire in the background
+            processOneJob(pickedQueue, jobId)
+                .catch(err => {
+                    logger.error({ err: err.message }, "Unhandled error in background job");
+                })
+                .finally(() => {
+                    inFlight--;
+                });
+
+        } catch (redisError) {
+            logger.error({ err: redisError.message }, "Redis connection error — backing off 1s");
+            await new Promise(resolve => setTimeout(resolve, 1000));
+        }
     }
 }
 
