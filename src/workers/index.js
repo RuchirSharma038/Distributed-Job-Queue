@@ -45,7 +45,7 @@ class Semaphore {
             this._active++;
             return Promise.resolve();
         }
-        // At capacity — queue up and wait for release()
+        // At capacity 
         return new Promise(resolve => this._waiters.push(resolve));
     }
 
@@ -63,7 +63,7 @@ class Semaphore {
 const sem = new Semaphore(CONCURRENCY);
 
 
-// Helpers — unchanged from previous version
+// Helpers 
 
 
 async function publishJobEvent(job, extraFields = {}) {
