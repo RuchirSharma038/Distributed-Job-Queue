@@ -8,23 +8,63 @@ import {
     RETRY_BASE_DELAY_MS,
     IO_BRPOP_QUEUES,
     COMPUTE_BRPOP_QUEUES,
-    getPriorityQueue,
-    QUEUE_ROUTING,
     DEFAULT_PRIORITY,
 } from "../config/constants.js";
 import { JOB_UPDATES_CHANNEL } from "../config/redisSubscriber.js";
 
+
+// Configuration
+
+
 const WORKER_TYPE = process.env.WORKER_TYPE || 'io';
 const LISTEN_QUEUES = WORKER_TYPE === 'compute' ? COMPUTE_BRPOP_QUEUES : IO_BRPOP_QUEUES;
+
 
 const CONCURRENCY = process.env.WORKER_CONCURRENCY
     ? parseInt(process.env.WORKER_CONCURRENCY)
     : WORKER_TYPE === 'io' ? 10 : 1;
 
-//  Redis connection for listening 
-const redisListener = redis.duplicate();
 
-// Redis Pub/Sub publisher
+const queueClient = redis.duplicate();
+
+
+// Semaphore 
+
+class Semaphore {
+    constructor(max) {
+        this._max = max;
+        this._active = 0;
+        this._waiters = [];
+    }
+
+    get active() { return this._active; }
+
+  
+    acquire() {
+        if (this._active < this._max) {
+            this._active++;
+            return Promise.resolve();
+        }
+        // At capacity — queue up and wait for release()
+        return new Promise(resolve => this._waiters.push(resolve));
+    }
+
+   
+    release() {
+        if (this._waiters.length > 0) {
+            // Hand the slot directly to the next waiter 
+            this._waiters.shift()();
+        } else {
+            this._active--;
+        }
+    }
+}
+
+const sem = new Semaphore(CONCURRENCY);
+
+
+// Helpers — unchanged from previous version
+
 
 async function publishJobEvent(job, extraFields = {}) {
     try {
@@ -37,24 +77,16 @@ async function publishJobEvent(job, extraFields = {}) {
             timestamp: new Date().toISOString(),
             ...extraFields,
         };
-
         await redis.publish(JOB_UPDATES_CHANNEL, JSON.stringify(event));
     } catch (err) {
-
-        logger.warn({ err: err.message, jobId: job.id }, 'Failed to publish job event — dashboard may miss this update');
+        logger.warn({ err: err.message, jobId: job.id },
+            'Failed to publish job event — dashboard may miss this update');
     }
 }
-
-
-// Child logger
-
 
 function createJobLogger(job) {
     return logger.child({ jobId: job.id, type: job.type, priority: job.priority });
 }
-
-
-// Retry + DLQ helpers
 
 function calcNextRetryTimestamp(retryCount) {
     return Date.now() + RETRY_BASE_DELAY_MS * Math.pow(2, retryCount - 1);
@@ -75,17 +107,13 @@ async function scheduleRetry(job, handlerError, log) {
     });
 
     await redis.zadd(DELAYED_QUEUE, nextRetryAt.getTime(), job.id);
-
-    // Publish
     await publishJobEvent(updated, {
         error: handlerError.message,
         nextRetryAt: nextRetryAt.toISOString(),
     });
 
-    log.warn(
-        { attempt: newRetryCount, max: job.max_retries, retryAt: nextRetryAt },
-        `Job failed — scheduled retry ${newRetryCount}/${job.max_retries}`
-    );
+    log.warn({ attempt: newRetryCount, max: job.max_retries, retryAt: nextRetryAt },
+        `Job failed — scheduled retry ${newRetryCount}/${job.max_retries}`);
 }
 
 async function markDead(job, handlerError, log) {
@@ -97,11 +125,10 @@ async function markDead(job, handlerError, log) {
     await redis.lpush(DEAD_QUEUE, job.id);
     await publishJobEvent(updated, { error: handlerError.message });
 
-    log.error(
-        { retries: job.retry_count, error: handlerError.message },
-        `Job moved to Dead Letter Queue after ${job.retry_count} retries`
-    );
+    log.error({ retries: job.retry_count, error: handlerError.message },
+        `Job moved to Dead Letter Queue after ${job.retry_count} retries`);
 }
+
 
 async function processOneJob(pickedQueue, jobId) {
     const job = await prisma.job.findUnique({ where: { id: jobId } });
@@ -119,7 +146,6 @@ async function processOneJob(pickedQueue, jobId) {
         return;
     }
 
-    // Publish running
     const runningJob = await prisma.job.update({
         where: { id: jobId },
         data: { status: 'running', started_at: new Date() }
@@ -136,7 +162,6 @@ async function processOneJob(pickedQueue, jobId) {
         }
 
         const jobResult = await executeJob(job.payload, job.id, log);
-
         const completedJob = await prisma.job.update({
             where: { id: jobId },
             data: {
@@ -146,11 +171,11 @@ async function processOneJob(pickedQueue, jobId) {
             }
         });
 
-        // Publish result
         await publishJobEvent(completedJob, { result: jobResult });
         log.info("Job completed successfully");
 
     } catch (handlerError) {
+        
         try {
             if (handlerError.permanent) {
                 await markDead(job, handlerError, log);
@@ -160,52 +185,59 @@ async function processOneJob(pickedQueue, jobId) {
                 await markDead(job, handlerError, log);
             }
         } catch (recoveryError) {
-            logger.error(
-                { jobId: job.id, originalError: handlerError.message, recoveryError: recoveryError.message },
-                "CRITICAL: failed to record job failure — recovery mechanism itself threw. Job will rely on zombie hunter for eventual recovery."
-            );
+            logger.error({
+                jobId: job.id,
+                originalError: handlerError.message,
+                recoveryError: recoveryError.message,
+            }, "CRITICAL: failed to record job failure — job will rely on zombie hunter for recovery");
         }
     }
-
-
-
 }
+
 
 // Main worker loop
 
-let inFlight = 0;
+
+const BRPOP_TIMEOUT_S = 2; // seconds to wait before looping 
 
 async function startWorker() {
-    logger.info({ workerType: WORKER_TYPE, queues: LISTEN_QUEUES, pid: process.pid, concurrency: CONCURRENCY }, "Worker started");
+    logger.info({
+        workerType: WORKER_TYPE,
+        queues: LISTEN_QUEUES,
+        pid: process.pid,
+        concurrency: CONCURRENCY,
+    }, "Worker started");
 
     while (true) {
-        if (inFlight >= CONCURRENCY) {
-            await new Promise(resolve => setTimeout(resolve, 50));
+        //  wait for a concurrency slot
+        await sem.acquire();
+
+        //  pop a job from Redis
+        let result;
+        try {
+            result = await queueClient.brpop(...LISTEN_QUEUES, BRPOP_TIMEOUT_S);
+        } catch (redisError) {
+            // release the slot we already acquired 
+            sem.release();
+            logger.error({ err: redisError.message },
+                "Redis error on BRPOP — backing off 1s");
+            await new Promise(r => setTimeout(r, 1000));
             continue;
         }
 
-        try {
-            // Wait up to 1 second 
-            const result = await redisListener.brpop(...LISTEN_QUEUES, 1);
-            if (!result) continue;
-
-            const [pickedQueue, jobId] = result;
-            
-            inFlight++;
-            
-            // Fire in the background
-            processOneJob(pickedQueue, jobId)
-                .catch(err => {
-                    logger.error({ err: err.message }, "Unhandled error in background job");
-                })
-                .finally(() => {
-                    inFlight--;
-                });
-
-        } catch (redisError) {
-            logger.error({ err: redisError.message }, "Redis connection error — backing off 1s");
-            await new Promise(resolve => setTimeout(resolve, 1000));
+        // no job within timeout window
+        if (!result) {
+            sem.release(); // Return the slot 
+            continue;
         }
+
+        //  fire job in background
+        const [pickedQueue, jobId] = result;
+
+        processOneJob(pickedQueue, jobId)
+            .catch(err => logger.error({ err: err.message, jobId },
+                "Unhandled error in background job"))
+            .finally(() => sem.release()); // return the slot
     }
 }
 
