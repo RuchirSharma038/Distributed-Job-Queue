@@ -1,4 +1,4 @@
-import redis  from "../../config/redis.js";
+import redis from "../../config/redis.js";
 import prisma from "../../config/database.js";
 import { logger } from "../../config/logger.js";
 import {
@@ -19,11 +19,11 @@ function calcNextRetryTimestamp(retryCount) {
 export async function sweepZombies(timeoutMinutes = 15, dryRun = false) {
     const threshold = new Date(Date.now() - timeoutMinutes * 60 * 1000);
 
-   
+
     if (!dryRun) {
         await prisma.job.updateMany({
             where: {
-                status:     { in: ['running', 'sweeping'] },
+                status: { in: ['running', 'sweeping'] },
                 started_at: { lt: threshold },
             },
             data: { status: 'sweeping' },
@@ -39,7 +39,7 @@ export async function sweepZombies(timeoutMinutes = 15, dryRun = false) {
     const results = { found: zombies.length, retrying: 0, dead: 0, skipped: 0 };
 
     for (const zombie of zombies) {
-        const aliveForMs      = Date.now() - new Date(zombie.started_at).getTime();
+        const aliveForMs = Date.now() - new Date(zombie.started_at).getTime();
         const aliveForMinutes = (aliveForMs / 60_000).toFixed(1);
 
         if (dryRun) { results.skipped++; continue; }
@@ -50,25 +50,28 @@ export async function sweepZombies(timeoutMinutes = 15, dryRun = false) {
             await prisma.job.update({
                 where: { id: zombie.id },
                 data: {
-                    status:        'dead',
-                    dead_at:       new Date(),
+                    status: 'dead',
+                    dead_at: new Date(),
                     error_message: `Zombie sweep: unknown job type '${zombie.type}'`,
                 }
             });
-            await redis.lpush(DEAD_QUEUE, zombie.id);
+            const pipeline = redis.multi();
+            pipeline.lpush(DEAD_QUEUE, zombie.id);
+            pipeline.ltrim(DEAD_QUEUE, 0, 9999);
+            await pipeline.exec();
             results.dead++;
             continue;
         }
 
         if (zombie.retry_count < zombie.max_retries) {
             const newRetryCount = zombie.retry_count + 1;
-            const nextRetryAt   = new Date(calcNextRetryTimestamp(newRetryCount));
+            const nextRetryAt = new Date(calcNextRetryTimestamp(newRetryCount));
 
             await prisma.job.update({
                 where: { id: zombie.id },
                 data: {
-                    status:        'retrying',
-                    retry_count:   newRetryCount,
+                    status: 'retrying',
+                    retry_count: newRetryCount,
                     next_retry_at: nextRetryAt,
                     error_message: `Zombie sweep: worker killed after ${aliveForMinutes}min (attempt ${newRetryCount})`,
                 }
@@ -80,12 +83,15 @@ export async function sweepZombies(timeoutMinutes = 15, dryRun = false) {
             await prisma.job.update({
                 where: { id: zombie.id },
                 data: {
-                    status:        'dead',
-                    dead_at:       new Date(),
+                    status: 'dead',
+                    dead_at: new Date(),
                     error_message: `Zombie sweep: worker killed after ${aliveForMinutes}min (retries exhausted)`,
                 }
             });
-            await redis.lpush(DEAD_QUEUE, zombie.id);
+            const pipeline = redis.multi();
+            pipeline.lpush(DEAD_QUEUE, zombie.id);
+            pipeline.ltrim(DEAD_QUEUE, 0, 9999); // Keep only the newest 10,000 items
+            await pipeline.exec();
             results.dead++;
         }
     }

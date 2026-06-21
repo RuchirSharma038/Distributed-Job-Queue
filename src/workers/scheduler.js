@@ -71,20 +71,30 @@ async function promoteJob(jobId) {
     const isRetryJob = job.status === 'retrying';
 
     if (isScheduledJob) {
-        await prisma.job.update({
-            where: { id: jobId },
+        const updated = await prisma.job.updateMany({
+            where: { id: jobId, status: 'scheduled' },
             data: { status: 'queued' },
         });
+        if (updated.count === 0) {
+            logger.warn({ jobId }, "Scheduler: Job state changed during promotion, aborting.");
+            return;
+        }
     } else if (isRetryJob) {
-        await prisma.job.update({
-            where: { id: jobId },
-            data: { next_retry_at: null },
+        const updated = await prisma.job.updateMany({
+            where: { id: jobId, status: 'retrying' },
+            data: { status: 'queued', next_retry_at: null },
         });
+        if (updated.count === 0) {
+            logger.warn({ jobId }, "Scheduler: Job state changed during promotion, aborting.");
+            return;
+        }
     }
 
 
-    await redis.lpush(targetQueue, jobId);
-    await redis.zrem(DELAYED_QUEUE, jobId);
+    const pipeline = redis.multi();
+    pipeline.lpush(targetQueue, jobId);
+    pipeline.zrem(DELAYED_QUEUE, jobId);
+    await pipeline.exec();
 
     if (isScheduledJob) {
         logger.info(
@@ -108,7 +118,7 @@ async function promoteJob(jobId) {
 async function startScheduler() {
     logger.info({ pollIntervalMs: POLL_INTERVAL_MS }, "Scheduler started");
 
-    // Run immediately on startup, then on interval.
+    // Run immediately on startup, then on interval
     await promoteReadyJobs();
 
     setInterval(async () => {

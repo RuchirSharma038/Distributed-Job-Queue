@@ -60,7 +60,10 @@ async function processZombie(job, dryRun) {
             }
         });
 
-        await redis.lpush(DEAD_QUEUE, job.id);
+        const pipeline = redis.multi();
+        pipeline.lpush(DEAD_QUEUE, job.id);
+        pipeline.ltrim(DEAD_QUEUE, 0, 9999);
+        await pipeline.exec();
 
         logger.error(logContext, "Zombie swept to DLQ (Unknown job type)");
         return { result: 'dead' };
@@ -96,7 +99,10 @@ async function processZombie(job, dryRun) {
                 error_message: `Zombie sweep: worker process killed after ${aliveForMinutes}min (retries exhausted)`,
             }
         });
-        await redis.lpush(DEAD_QUEUE, job.id);
+        const pipeline = redis.multi();
+        pipeline.lpush(DEAD_QUEUE, job.id);
+        pipeline.ltrim(DEAD_QUEUE, 0, 9999); 
+        await pipeline.exec();
 
         logger.error(logContext, "Zombie swept to DLQ (Retries exhausted)");
         return { result: 'dead' };

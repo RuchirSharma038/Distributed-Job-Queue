@@ -39,7 +39,7 @@ class Semaphore {
 
     get active() { return this._active; }
 
-  
+
     acquire() {
         if (this._active < this._max) {
             this._active++;
@@ -49,7 +49,7 @@ class Semaphore {
         return new Promise(resolve => this._waiters.push(resolve));
     }
 
-   
+
     release() {
         if (this._waiters.length > 0) {
             // Hand the slot directly to the next waiter 
@@ -96,8 +96,8 @@ async function scheduleRetry(job, handlerError, log) {
     const newRetryCount = job.retry_count + 1;
     const nextRetryAt = new Date(calcNextRetryTimestamp(newRetryCount));
 
-    const updated = await prisma.job.update({
-        where: { id: job.id },
+    const claim = await prisma.job.updateMany({
+        where: { id: job.id, status: 'running' },
         data: {
             status: 'retrying',
             retry_count: newRetryCount,
@@ -105,8 +105,16 @@ async function scheduleRetry(job, handlerError, log) {
             error_message: handlerError.message,
         }
     });
+    if (claim.count === 0) {
+        log.warn(
+            { jobId: job.id },
+            "scheduleRetry: job no longer 'running' — already reconciled/swept elsewhere, discarding this worker's retry attempt"
+        );
+        return;
+    }
 
     await redis.zadd(DELAYED_QUEUE, nextRetryAt.getTime(), job.id);
+    const updated = { ...job, status: 'retrying', retry_count: newRetryCount };
     await publishJobEvent(updated, {
         error: handlerError.message,
         nextRetryAt: nextRetryAt.toISOString(),
@@ -117,12 +125,23 @@ async function scheduleRetry(job, handlerError, log) {
 }
 
 async function markDead(job, handlerError, log) {
-    const updated = await prisma.job.update({
-        where: { id: job.id },
+    const claim = await prisma.job.updateMany({
+        where: { id: job.id, status: 'running' },
         data: { status: 'dead', dead_at: new Date(), error_message: handlerError.message }
     });
+    if (claim.count === 0) {
+        log.warn(
+            { jobId: job.id },
+            "markDead: job no longer 'running' — already reconciled/swept elsewhere, discarding this worker's dead-letter attempt"
+        );
+        return;
+    }
 
-    await redis.lpush(DEAD_QUEUE, job.id);
+    const pipeline = redis.multi();
+    pipeline.lpush(DEAD_QUEUE, job.id);
+    pipeline.ltrim(DEAD_QUEUE, 0, 9999);
+    await pipeline.exec();
+    const updated = { ...job, status: 'dead' };
     await publishJobEvent(updated, { error: handlerError.message });
 
     log.error({ retries: job.retry_count, error: handlerError.message },
@@ -162,8 +181,8 @@ async function processOneJob(pickedQueue, jobId) {
         }
 
         const jobResult = await executeJob(job.payload, job.id, log);
-        const completedJob = await prisma.job.update({
-            where: { id: jobId },
+        const claim = await prisma.job.updateMany({
+            where: { id: jobId, status: 'running' },
             data: {
                 status: 'completed',
                 completed_at: new Date(),
@@ -171,11 +190,20 @@ async function processOneJob(pickedQueue, jobId) {
             }
         });
 
+        if (claim.count === 0) {
+            log.warn(
+                { jobId },
+                "Job finished, but was already swept/reconciled by another process — discarding this worker's result rather than overwriting"
+            );
+        }
+
+
+        const completedJob = { ...job, status: 'completed', result_data: jobResult };
         await publishJobEvent(completedJob, { result: jobResult });
         log.info("Job completed successfully");
 
     } catch (handlerError) {
-        
+
         try {
             if (handlerError.permanent) {
                 await markDead(job, handlerError, log);
