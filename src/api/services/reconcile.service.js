@@ -68,7 +68,7 @@ async function reconcileStuckScheduled(dryRun) {
 
         const claim = await prisma.job.updateMany({
             where: { id: job.id, status: 'scheduled' },
-            data: { scheduled_at: job.scheduled_at }, // no-op write, same value, just makes this a CAS
+            data: { scheduled_at: job.scheduled_at }, 
         });
 
         if (claim.count === 0) {

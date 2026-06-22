@@ -1,7 +1,7 @@
 import axios from "axios";
 import * as cheerio from "cheerio";
 
-const processScrapper = async (payload) => {
+const processScrapper = async (payload, jobId, log) => {
     const { url, targetSelector } = payload;
     log.info({ url, targetSelector }, "Scraper handler started");
 
@@ -45,7 +45,7 @@ const processScrapper = async (payload) => {
         }
 
         const cleanPrice = parseFloat(priceMatch[0]);
-       
+
 
 
         const result = {

@@ -1,6 +1,6 @@
 import { PRIORITIES } from "../../config/constants.js";
 
-const jobSchemas = {
+export const jobSchemas = {
     'SEND_EMAIL': ['to', 'subject', 'body'],
     'SCRAPE_WEBSITE': ['url', 'targetSelector'],
     'PROCESS_IMAGE': ['inputPath', 'filename', 'operations'],
