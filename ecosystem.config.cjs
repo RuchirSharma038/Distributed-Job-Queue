@@ -58,6 +58,16 @@ module.exports = {
             args: '--execute',
             watch: false,
         },
+        {
+            name: 'reconciler',
+            script: './src/scripts/reconcile.js',
+            instances: 1,
+            exec_mode: 'fork',
+            autorestart: false,
+            cron_restart: '*/10 * * * *',
+            args: '--execute',
+            watch: false,
+        },
 
 
     ]
