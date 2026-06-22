@@ -381,6 +381,9 @@
     </a>
 
     <div class="sidebar-section">Management</div>
+    <a class="nav-item" onclick="showPage('submit')">
+      <span>➕</span> Submit Job
+    </a>
     <a class="nav-item" onclick="showPage('graveyard')">
       <span>☠</span> Graveyard
     </a>
@@ -400,6 +403,14 @@
     <!-- OVERVIEW PAGE -->
     <div class="page active" id="page-overview">
       <div class="page-title">Overview</div>
+
+      <div id="reconcile-banner" style="display:none; margin-bottom:16px; padding:12px 16px; background:var(--amber-bg); border:1px solid #92400e; border-radius:8px; display:flex; align-items:center; justify-content:space-between; gap:12px;">
+        <div style="display:flex; align-items:center; gap:10px; font-size:0.85rem; color:var(--amber);">
+          <span style="font-size:1.1rem;">⚠</span>
+          <span id="reconcile-banner-text">— jobs stuck in a ghost state</span>
+        </div>
+        <button class="btn btn-primary" style="padding:6px 14px; font-size:0.78rem;" onclick="runReconcile()">Fix now</button>
+      </div>
 
       <div class="cards">
         <div class="card c-green">
@@ -474,6 +485,53 @@
       </div>
     </div>
 
+    <!-- SUBMIT JOB PAGE -->
+    <div class="page" id="page-submit">
+      <div class="page-title">Submit New Job</div>
+      
+      <div class="panel" style="max-width: 600px; margin-bottom: 24px; animation: fadein 0.3s ease;">
+        <div class="panel-title">Job Details</div>
+        
+        <div style="margin-bottom: 16px;">
+          <label style="display:block;margin-bottom:6px;color:var(--muted);font-size:0.8rem;text-transform:uppercase;letter-spacing:0.5px;">Job Type</label>
+          <select id="job-type" style="width:100%;padding:12px;background:#111113;border:1px solid var(--border);color:var(--text);border-radius:6px;outline:none;font-size:0.9rem;transition:border-color 0.2s;" onchange="updateJobForm()" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'">
+            <option value="SEND_EMAIL">Send Email (Fast-Lane I/O)</option>
+            <option value="GENERATE_PDF">Generate PDF (Heavy-Lift Compute)</option>
+          </select>
+        </div>
+
+        <div id="form-email">
+          <div style="margin-bottom: 16px;">
+            <label style="display:block;margin-bottom:6px;color:var(--muted);font-size:0.8rem;text-transform:uppercase;letter-spacing:0.5px;">To</label>
+            <input type="email" id="email-to" value="test@example.com" style="width:100%;padding:12px;background:#111113;border:1px solid var(--border);color:var(--text);border-radius:6px;outline:none;font-size:0.9rem;transition:border-color 0.2s;" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'" />
+          </div>
+          <div style="margin-bottom: 16px;">
+            <label style="display:block;margin-bottom:6px;color:var(--muted);font-size:0.8rem;text-transform:uppercase;letter-spacing:0.5px;">Subject</label>
+            <input type="text" id="email-subject" value="Hello from Dashboard" style="width:100%;padding:12px;background:#111113;border:1px solid var(--border);color:var(--text);border-radius:6px;outline:none;font-size:0.9rem;transition:border-color 0.2s;" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'" />
+          </div>
+          <div style="margin-bottom: 24px;">
+            <label style="display:block;margin-bottom:6px;color:var(--muted);font-size:0.8rem;text-transform:uppercase;letter-spacing:0.5px;">Body</label>
+            <textarea id="email-body" style="width:100%;height:100px;padding:12px;background:#111113;border:1px solid var(--border);color:var(--text);border-radius:6px;outline:none;font-size:0.9rem;resize:vertical;transition:border-color 0.2s;" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'">This job was submitted manually from the beautiful UI.</textarea>
+          </div>
+        </div>
+
+        <div id="form-pdf" style="display:none;">
+          <div style="margin-bottom: 16px;">
+            <label style="display:block;margin-bottom:6px;color:var(--muted);font-size:0.8rem;text-transform:uppercase;letter-spacing:0.5px;">Filename</label>
+            <input type="text" id="pdf-filename" value="dashboard_invoice.pdf" style="width:100%;padding:12px;background:#111113;border:1px solid var(--border);color:var(--text);border-radius:6px;outline:none;font-size:0.9rem;transition:border-color 0.2s;" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'" />
+          </div>
+          <div style="margin-bottom: 24px;">
+            <label style="display:block;margin-bottom:6px;color:var(--muted);font-size:0.8rem;text-transform:uppercase;letter-spacing:0.5px;">Customer Name</label>
+            <input type="text" id="pdf-customer" value="John Doe" style="width:100%;padding:12px;background:#111113;border:1px solid var(--border);color:var(--text);border-radius:6px;outline:none;font-size:0.9rem;transition:border-color 0.2s;" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'" />
+          </div>
+        </div>
+
+        <button class="btn btn-primary" id="btn-submit-job" onclick="submitNewJob()" style="width:100%;padding:14px;font-size:0.95rem;text-transform:uppercase;letter-spacing:1px;font-weight:700;">
+          Deploy Job to Queue
+        </button>
+      </div>
+    </div>
+
     <!-- ACTIONS PAGE -->
     <div class="page" id="page-actions">
       <div class="page-title">Actions</div>
@@ -491,7 +549,7 @@
         </div>
       </div>
 
-      <div class="panel">
+      <div class="panel" style="margin-bottom:16px;">
         <div class="panel-title">Zombie Hunter</div>
         <p style="color:var(--muted);font-size:0.82rem;margin-bottom:14px;">
           Scan for jobs stuck in <code style="color:var(--blue)">running</code> state
@@ -507,6 +565,22 @@
           </span>
         </div>
       </div>
+
+      <div class="panel">
+        <div class="panel-title">Dual-Write Reconciliation</div>
+        <p style="color:var(--muted);font-size:0.82rem;margin-bottom:14px;">
+          Finds jobs where the Postgres write succeeded but the matching Redis write
+          never happened — these are invisible to the zombie hunter because their
+          status never reached <code style="color:var(--blue)">running</code>.
+          Safe to run anytime; re-pushing an already-queued job is a no-op for workers.
+        </p>
+        <div class="actions">
+          <button class="btn btn-primary" id="btn-reconcile" onclick="runReconcile()">
+            Run reconciliation
+          </button>
+          <span id="reconcile-status-text" style="font-size:0.78rem;color:var(--muted);align-self:center;"></span>
+        </div>
+      </div>
     </div>
 
   </main>
@@ -517,8 +591,12 @@
 function showPage(name) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-  document.getElementById('page-' + name).classList.add('active');
-  event.currentTarget.classList.add('active');
+  
+  const targetPage = document.getElementById('page-' + name);
+  if (targetPage) targetPage.classList.add('active');
+  
+  const navItem = Array.from(document.querySelectorAll('.nav-item')).find(el => el.getAttribute('onclick')?.includes(`'${name}'`));
+  if (navItem) navItem.classList.add('active');
 }
 
 //     Stats & chart 
@@ -637,6 +715,109 @@ async function runZombieSweep() {
   }
 }
 
+async function runReconcile() {
+  const btn = document.getElementById('btn-reconcile');
+  if (btn) { btn.disabled = true; btn.textContent = 'Reconciling…'; }
+
+  try {
+    const res  = await fetch('/api/system/reconcile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dryRun: false }),
+    });
+    const data = await res.json();
+    toast(`Reconciled ${data.total} job(s) — ${data.stuckQueued} queued, ${data.stuckScheduled} scheduled, ${data.stuckRetrying} retrying, ${data.phantomDead} phantom dead entries cleaned`, 'success');
+    loadStats();
+    checkReconciliationStatus();
+  } catch {
+    toast('Reconciliation failed — check the console', 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Run reconciliation'; }
+  }
+}
+
+async function checkReconciliationStatus() {
+  try {
+    const res  = await fetch('/api/system/health');
+    const data = await res.json();
+    const r    = data.reconciliation;
+
+    const banner = document.getElementById('reconcile-banner');
+    const text   = document.getElementById('reconcile-banner-text');
+
+    if (r && r.total > 0) {
+      const parts = [];
+      if (r.stuckQueued)    parts.push(`${r.stuckQueued} stuck queued`);
+      if (r.stuckScheduled) parts.push(`${r.stuckScheduled} stuck scheduled`);
+      if (r.stuckRetrying)  parts.push(`${r.stuckRetrying} stuck retrying`);
+      text.textContent = parts.join(', ') + ' — jobs in a ghost state, never reached Redis';
+      banner.style.display = 'flex';
+    } else {
+      banner.style.display = 'none';
+    }
+  } catch (err) {
+    console.error('checkReconciliationStatus failed:', err);
+  }
+}
+
+// --- Job Submission ---
+function updateJobForm() {
+  const type = document.getElementById('job-type').value;
+  document.getElementById('form-email').style.display = type === 'SEND_EMAIL' ? 'block' : 'none';
+  document.getElementById('form-pdf').style.display = type === 'GENERATE_PDF' ? 'block' : 'none';
+}
+
+async function submitNewJob() {
+  const btn = document.getElementById('btn-submit-job');
+  const type = document.getElementById('job-type').value;
+  let payload = {};
+
+  if (type === 'SEND_EMAIL') {
+    payload = {
+      to: document.getElementById('email-to').value,
+      subject: document.getElementById('email-subject').value,
+      body: document.getElementById('email-body').value
+    };
+  } else {
+    payload = {
+      filename: document.getElementById('pdf-filename').value,
+      invoiceData: {
+        orderId: `ORD-${Math.floor(Math.random() * 1000)}`,
+        customerName: document.getElementById('pdf-customer').value,
+        totalAmount: 49.99,
+        items: [{name: "Dashboard Item", price: 49.99}]
+      }
+    };
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Submitting...';
+
+  try {
+    const res = await fetch('/api/jobs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobType: type, payload })
+    });
+    
+    if (!res.ok) {
+      const errorData = await res.json();
+      throw new Error(errorData.error || 'Failed to deploy');
+    }
+    
+    const data = await res.json();
+    toast(`Job deployed! ID: ${data.jobId.slice(0, 8)}...`, 'success');
+    
+    // Switch to live feed to watch it process
+    showPage('live');
+  } catch (err) {
+    toast(`Failed: ${err.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Deploy Job to Queue';
+  }
+}
+
 // Live feed
 function addFeedItem(event) {
   const list  = document.getElementById('feed-list');
@@ -655,6 +836,16 @@ function addFeedItem(event) {
       <div class="fi-status s-${event.status}">${event.status}</div>
       <div class="fi-time">${new Date(event.timestamp).toLocaleTimeString()}</div>
     </div>
+    ${event.result || event.error ? `
+    <details style="grid-column: 1 / -1; margin-top: 4px;">
+      <summary style="font-size:0.75rem; color:${event.error ? 'var(--red)' : 'var(--blue)'}; cursor:pointer; user-select:none;">
+        ${event.error ? 'Show Error' : 'Show Result'}
+      </summary>
+      <pre style="background:var(--surface); padding:8px; border-radius:4px; font-size:0.72rem; overflow-x:auto; margin-top:6px; border: 1px solid var(--border); color:${event.error ? 'var(--red)' : 'var(--muted)'};">
+${escHtml(typeof (event.result || event.error) === 'object' ? JSON.stringify(event.result || event.error, null, 2) : String(event.result || event.error))}
+      </pre>
+    </details>
+    ` : ''}
   `;
   list.insertBefore(el, list.firstChild);
 
@@ -709,8 +900,12 @@ socket.on('job:updated', (event) => {
 
 
 loadStats();
+checkReconciliationStatus();
 
-setInterval(loadStats, 15_000);
+setInterval(() => {
+  loadStats();
+  checkReconciliationStatus();
+}, 15_000);
 </script>
 </body>
 </html>

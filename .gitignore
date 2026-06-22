@@ -3,6 +3,8 @@ node_modules/
 dist/
 build/
 /src/generated/prisma
+/public/pdfs
+/public/processed
 
 # Prisma generated folders 
 /prisma/sqlite.db
