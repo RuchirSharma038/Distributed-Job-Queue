@@ -32,18 +32,44 @@ async function reconcileStuckQueued(dryRun) {
             continue;
         }
 
-        const claim = await prisma.job.updateMany({
+        // Acquire mutex
+        const locked = await prisma.job.updateMany({
             where: { id: job.id, status: 'queued' },
-            data: { priority: job.priority ?? DEFAULT_PRIORITY },
+            data: { status: 'reconciling' },
         });
 
-        if (claim.count === 0) {
-            logger.info({ jobId: job.id }, 'reconcile: job status changed before re-push — skipping stale candidate');
+        if (locked.count === 0) {
+            logger.info({ jobId: job.id },
+                'reconcile: job status changed before lock — skipping stale candidate');
             continue;
         }
 
-        logger.warn({ jobId: job.id, targetQueue }, 'reconcile: stuck queued job, re-pushing');
-        await redis.lpush(targetQueue, job.id);
+        // Redis write
+        try {
+            await redis.lpush(targetQueue, job.id);
+        } catch (redisErr) {
+            logger.error({ jobId: job.id, err: redisErr.message },
+                'reconcile: redis push failed — releasing mutex back to queued');
+            await prisma.job.updateMany({
+                where: { id: job.id, status: 'reconciling' },
+                data: { status: 'queued' },
+            });
+            continue;
+        }
+
+        //Release mutex
+        const released = await prisma.job.updateMany({
+            where: { id: job.id, status: 'reconciling' },
+            data: { status: 'queued' },
+        });
+        if (released.count === 0) {
+            logger.info({ jobId: job.id },
+                'reconcile: worker claimed job during mutex window — correct, no action needed');
+        } else {
+            logger.warn({ jobId: job.id, targetQueue },
+                'reconcile: stuck queued job re-pushed under mutex');
+        }
+
         actedOn++;
     }
 
@@ -66,18 +92,43 @@ async function reconcileStuckScheduled(dryRun) {
             continue;
         }
 
-        const claim = await prisma.job.updateMany({
+        const locked = await prisma.job.updateMany({
             where: { id: job.id, status: 'scheduled' },
-            data: { scheduled_at: job.scheduled_at }, 
+            data: { status: 'reconciling' },
         });
 
-        if (claim.count === 0) {
-            logger.info({ jobId: job.id }, 'reconcile: job status changed before re-add — skipping stale candidate');
+        if (locked.count === 0) {
+            logger.info({ jobId: job.id },
+                'reconcile: job status changed before lock — skipping');
             continue;
         }
 
-        logger.warn({ jobId: job.id }, 'reconcile: stuck scheduled job, re-adding to delayed queue');
-        await redis.zadd(DELAYED_QUEUE, score, job.id);
+        try {
+            await redis.zadd(DELAYED_QUEUE, score, job.id);
+        } catch (redisErr) {
+            logger.error({ jobId: job.id, err: redisErr.message },
+                'reconcile: redis zadd failed — releasing mutex back to scheduled');
+            await prisma.job.updateMany({
+                where: { id: job.id, status: 'reconciling' },
+                data: { status: 'scheduled' },
+            });
+            continue;
+        }
+
+        const released = await prisma.job.updateMany({
+            where: { id: job.id, status: 'reconciling' },
+            data: { status: 'scheduled' },
+        });
+
+        if (released.count === 0) {
+            logger.info({ jobId: job.id },
+                'reconcile: scheduler or another process handled this job during mutex');
+        } else {
+            logger.warn({ jobId: job.id },
+                'reconcile: stuck scheduled job re-added to delayed queue');
+        }
+
+
         actedOn++;
     }
 
@@ -106,18 +157,41 @@ async function reconcileStuckRetrying(dryRun) {
             continue;
         }
 
-        const claim = await prisma.job.updateMany({
+        const locked = await prisma.job.updateMany({
             where: { id: job.id, status: 'retrying' },
-            data: { retry_count: job.retry_count },
+            data: { status: 'reconciling' },
         });
 
-        if (claim.count === 0) {
-            logger.info({ jobId: job.id }, 'reconcile: job status changed before re-add — skipping stale candidate');
+        if (locked.count === 0) {
+            logger.info({ jobId: job.id },
+                'reconcile: job status changed before lock — skipping');
             continue;
         }
 
-        logger.warn({ jobId: job.id, retryCount: job.retry_count }, 'reconcile: stuck retrying job, re-adding to delayed queue');
-        await redis.zadd(DELAYED_QUEUE, score, job.id);
+        try {
+            await redis.zadd(DELAYED_QUEUE, score, job.id);
+        } catch (redisErr) {
+            logger.error({ jobId: job.id, err: redisErr.message },
+                'reconcile: redis zadd failed — releasing mutex back to retrying');
+            await prisma.job.updateMany({
+                where: { id: job.id, status: 'reconciling' },
+                data: { status: 'retrying' },
+            });
+            continue;
+        }
+
+        const released = await prisma.job.updateMany({
+            where: { id: job.id, status: 'reconciling' },
+            data: { status: 'retrying' },
+        });
+
+        if (released.count === 0) {
+            logger.info({ jobId: job.id },
+                'reconcile: worker claimed job during mutex window — correct');
+        } else {
+            logger.warn({ jobId: job.id, retryCount: job.retry_count },
+                'reconcile: stuck retrying job re-added to delayed queue');
+        }
         actedOn++;
 
     }
@@ -148,7 +222,7 @@ async function reconcilePhantomDeadEntries(dryRun) {
         const fresh = await prisma.job.findUnique({ where: { id }, select: { status: true } });
 
         if (!fresh) {
-            
+
             logger.warn({ jobId: id }, 'reconcile: removing phantom queue:dead entry — no Postgres record');
             await redis.lrem(DEAD_QUEUE, 1, id);
             phantomCount++;
@@ -156,7 +230,7 @@ async function reconcilePhantomDeadEntries(dryRun) {
         }
 
         if (fresh.status === 'dead') {
-           
+
             logger.info({ jobId: id }, 'reconcile: job became dead since batch read — not a phantom, skipping');
             continue;
         }
@@ -192,7 +266,7 @@ export async function runReconciliation(dryRun = false) {
 export async function getReconciliationStatus() {
     const threshold = new Date(Date.now() - STUCK_THRESHOLD_MS);
 
-    const [stuckQueued, stuckScheduled, stuckRetrying] = await Promise.all([
+    const [stuckQueued, stuckScheduled, stuckRetrying, stuckReconciling] = await Promise.all([
         prisma.job.count({ where: { status: 'queued', created_at: { lt: threshold } } }),
         prisma.job.count({ where: { status: 'scheduled', created_at: { lt: threshold } } }),
         prisma.job.count({
@@ -201,6 +275,7 @@ export async function getReconciliationStatus() {
                 OR: [{ next_retry_at: null }, { next_retry_at: { lt: threshold } }],
             }
         }),
+        prisma.job.count({ where: { status: 'reconciling' } }),
     ]);
 
     const total = stuckQueued + stuckScheduled + stuckRetrying;
@@ -209,6 +284,7 @@ export async function getReconciliationStatus() {
         stuckQueued,
         stuckScheduled,
         stuckRetrying,
+        stuckReconciling,
         total,
         healthy: total === 0,
     };

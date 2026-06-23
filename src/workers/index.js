@@ -165,9 +165,21 @@ async function processOneJob(pickedQueue, jobId) {
         return;
     }
 
-    const runningJob = await prisma.job.update({
+    const initialClaim = await prisma.job.updateMany({
+        where: { id: jobId, status: { in: ['queued', 'retrying', 'reconciling'] } },
+        data: { status: 'running', started_at: new Date() },
+    });
+
+    if (initialClaim.count === 0) {
+        log.warn({ jobId },
+            'Initial claim failed — job status changed between read and claim ' +
+            '(cancelled, duplicate, or already running). Discarding safely.');
+        return;
+    }
+
+    const runningJob = await prisma.job.findUnique({
         where: { id: jobId },
-        data: { status: 'running', started_at: new Date() }
+
     });
     await publishJobEvent(runningJob);
 
