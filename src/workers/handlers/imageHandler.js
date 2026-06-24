@@ -1,16 +1,25 @@
 import sharp from 'sharp';
 import path from 'path';
 import fs from 'fs/promises';
+import crypto from 'crypto';
 
 const OUTPUT_DIR = './public/processed';
 
-function getOutputPath(baseName, operation) {
+function getOutputPath(jobId, operation) {
+    const safeJobId = jobId.replace(/[^a-zA-Z0-9-_]/g, '');
     const map = {
-        thumbnail: `${baseName}-thumb.jpg`,
-        webp: `${baseName}.webp`,
-        grayscale: `${baseName}-bw.jpg`,
+        thumbnail: `${safeJobId}-thumb.jpg`,
+        webp: `${safeJobId}.webp`,
+        grayscale: `${safeJobId}-bw.jpg`,
     };
+    if (!map[operation]) throw new Error(`Unknown operation: ${operation}`);
     return path.join(OUTPUT_DIR, map[operation]);
+}
+
+function getTempPath(jobId, operation) {
+    const safeJobId = jobId.replace(/[^a-zA-Z0-9-_]/g, '');
+    const token = crypto.randomBytes(4).toString('hex');
+    return path.join(OUTPUT_DIR, `${safeJobId}-${operation}-${process.pid}-${token}.tmp`);
 }
 
 async function fileExists(filePath) {
@@ -23,14 +32,33 @@ async function fileExists(filePath) {
     }
 }
 
+async function atomicSharpWrite(pipeline, finalPath, tempPath) {
+    let writeSucceeded = false;
+
+    try {
+        await pipeline.toFile(tempPath);
+        writeSucceeded = true;
+        await fs.rename(tempPath, finalPath);
+
+    } catch (err) {
+        if (writeSucceeded && (err.code === 'ENOENT' || err.code === 'EEXIST')) {
+
+            return;
+        }
+
+        throw err;
+
+    } finally {
+        // Unconditional cleanup 
+        try { await fs.unlink(tempPath); } catch { /* ENOENT = already moved */ }
+    }
+}
+
 const processImage = async (payload, jobId, log) => {
     const { inputPath, filename, operations } = payload;
-    const baseName = path.parse(filename).name;
-
-    log.info({ filename, operations }, "Starting image processing");
+    log.info({ jobId, filename, operations }, 'Starting image processing');
 
     await fs.mkdir(OUTPUT_DIR, { recursive: true });
-
 
     // IDEMPOTENCY CHECK
 
@@ -38,20 +66,20 @@ const processImage = async (payload, jobId, log) => {
     const pendingOperations = [];
 
     for (const op of operations) {
-        const outputPath = getOutputPath(baseName, op);
+        const outputPath = getOutputPath(jobId, op);
         if (await fileExists(outputPath)) {
-            // Already done on a previous attempt — include in results
+
             existingResults[op] = `/processed/${path.basename(outputPath)}`;
-            log.info({ operation: op }, "Idempotency: Output already exists and is valid, skipping");
+            log.info({ jobId, operation: op }, "Idempotency: Output already exists and is valid, skipping");
         } else {
             pendingOperations.push(op);
         }
     }
 
-    // All operations already completed — nothing to do
+    // All operations already completed 
     if (pendingOperations.length === 0) {
-        log.info("All outputs already exist — returning cached results");
-        return { success: true, generatedFiles: existingResults };
+        log.info({ jobId }, "All outputs already exist — returning cached results");
+        return { success: true, generatedFiles: existingResults, requestedFilename: filename };
     }
 
 
@@ -62,8 +90,8 @@ const processImage = async (payload, jobId, log) => {
     } catch {
 
         if (Object.keys(existingResults).length > 0) {
-            log.warn("Source gone but partial results exist — returning what we have");
-            return { success: true, generatedFiles: existingResults };
+            log.warn({ jobId }, "Source gone but partial results exist — returning what we have");
+            return { success: true, generatedFiles: existingResults, requestedFilename: filename };
         }
 
         const err = new Error(`Source file not found at ${inputPath} and no outputs exist`);
@@ -75,50 +103,56 @@ const processImage = async (payload, jobId, log) => {
     // Process the pending operations
 
     const newResults = {};
+    const imagePipeline = sharp(inputPath);
 
     try {
-        const imagePipeline = sharp(inputPath);
+
 
         if (pendingOperations.includes('thumbnail')) {
-            const thumbPath = getOutputPath(baseName, 'thumbnail');
-            await imagePipeline
-                .clone()
-                .resize(200, 200, { fit: 'cover' })
-                .jpeg({ quality: 80 })
-                .toFile(thumbPath);
-            newResults.thumbnail = `/processed/${path.basename(thumbPath)}`;
+            const finalPath = getOutputPath(jobId, 'thumbnail');
+            const tempPath = getTempPath(jobId, 'thumbnail');
+            await atomicSharpWrite(
+                imagePipeline.clone().resize(200, 200, { fit: 'cover' }).jpeg({ quality: 80 }),
+                finalPath, tempPath
+            );
+            newResults.thumbnail = `/processed/${path.basename(finalPath)}`;
+            log.info({ jobId, finalPath }, 'Thumbnail written');
         }
 
         if (pendingOperations.includes('webp')) {
-            const webpPath = getOutputPath(baseName, 'webp');
-            await imagePipeline
-                .clone()
-                .webp({ quality: 75 })
-                .toFile(webpPath);
-            newResults.webp = `/processed/${path.basename(webpPath)}`;
+            const finalPath = getOutputPath(jobId, 'webp');
+            const tempPath = getTempPath(jobId, 'webp');
+            await atomicSharpWrite(
+                imagePipeline.clone().webp({ quality: 75 }),
+                finalPath, tempPath
+            );
+            newResults.webp = `/processed/${path.basename(finalPath)}`;
+            log.info({ jobId, finalPath }, 'WebP written');
         }
 
         if (pendingOperations.includes('grayscale')) {
-            const grayPath = getOutputPath(baseName, 'grayscale');
-            await imagePipeline
-                .clone()
-                .grayscale()
-                .jpeg({ quality: 90 })
-                .toFile(grayPath);
-            newResults.grayscale = `/processed/${path.basename(grayPath)}`;
+            const finalPath = getOutputPath(jobId, 'grayscale');
+            const tempPath = getTempPath(jobId, 'grayscale');
+            await atomicSharpWrite(
+                imagePipeline.clone().grayscale().jpeg({ quality: 90 }),
+                finalPath, tempPath
+            );
+            newResults.grayscale = `/processed/${path.basename(finalPath)}`;
+            log.info({ jobId, finalPath }, 'Grayscale written');
         }
 
 
         try {
             await fs.unlink(inputPath);
-            log.info("Cleaned up source file");
+            log.info({jobId},"Cleaned up source file");
         } catch (cleanupError) {
-            log.warn({ err: cleanupError.message }, "Failed to delete source file, but job succeeded. Proceeding.");
+            log.warn({ jobId, err: cleanupError.message }, "Failed to delete source file, but job succeeded. Proceeding.");
         }
 
         return {
             success: true,
             generatedFiles: { ...existingResults, ...newResults },
+            requestedFilename: filename
         };
 
     } catch (error) {
