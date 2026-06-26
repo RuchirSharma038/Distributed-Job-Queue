@@ -5,7 +5,14 @@ import { logger } from './config/logger.js';
 import { setIo } from './config/socket.js';
 import { startSubscriber } from './config/redisSubscriber.js';
 import jobRoutes from './api/routes/job.routes.js';
-import systemRoutes from './api/routes/system.routes.js'
+import systemRoutes from './api/routes/system.routes.js';
+import { jobSchemas } from './api/validators/jobValidators.js';
+import { QUEUE_ROUTING } from './config/constants.js';
+
+const missing = Object.keys(jobSchemas).filter(t => !QUEUE_ROUTING[t]);
+if (missing.length > 0) {
+    throw new Error(`Job types missing from QUEUE_ROUTING: ${missing.join(', ')}`);
+}
 const PORT = process.env.PORT || 3002;
 
 const app = express();

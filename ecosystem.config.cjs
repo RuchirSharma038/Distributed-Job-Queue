@@ -22,7 +22,8 @@ module.exports = {
             env: {
                 NODE_ENV: 'production',
                 WORKER_TYPE: 'io',
-                QUEUE_NAME: "queue:io"
+                QUEUE_NAME: "queue:io",
+                WORKER_CONCURRENCY: 20
             }
         },
 
