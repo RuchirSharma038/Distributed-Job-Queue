@@ -3,46 +3,39 @@ import prisma from '../../config/database.js';
 import redis from '../../config/redis.js';
 //import { logger } from '../../config/logger.js';
 
-const SENT_KEY_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
+const PRE_SEND_TTL_S = 60;          // 1 minute 
+const POST_SEND_TTL_S = 7 * 24 * 3600;
 
 let transporter = null;
+let transporterPromise = null;
 
 async function getTransporter(log) {
     if (transporter) return transporter;
 
 
-    const testAccount = await nodemailer.createTestAccount();
+    if (!transporterPromise) {
 
-    transporter = nodemailer.createTransport({
-        host: 'smtp.ethereal.email',
-        port: 587,
-        secure: false,
-        auth: {
-            user: testAccount.user,
-            pass: testAccount.pass,
-        },
-    });
+        transporterPromise = (async () => {
+            try {
+                const account = await nodemailer.createTestAccount();
 
-    log.info({ account: testAccount.user }, "Ethereal SMTP initialized");
-    return transporter;
-}
+                transporter = nodemailer.createTransport({
+                    host: 'smtp.ethereal.email',
+                    port: 587,
+                    auth: { user: account.user, pass: account.pass },
+                });
 
-
-// Idempotency helper 
-
-
-async function isAlreadySent(jobId) {
-    try {
-        const val = await redis.get(`sent_email:${jobId}`);
-        return val !== null;
-    } catch {
-        return false;
+                return transporter;
+            } catch (err) {
+                //  Reset THE PROMISE
+                transporterPromise = null;
+                throw err;
+            }
+        })();
     }
+    return transporterPromise;
 }
 
-async function markAsSent(jobId) {
-    await redis.set(`sent_email:${jobId}`, '1', 'EX', SENT_KEY_TTL_SECONDS);
-}
 
 
 // Handler
@@ -50,32 +43,48 @@ async function markAsSent(jobId) {
 
 const processEmail = async (payload, jobId, log) => {
 
-    //const jobId = jobLogger.bindings().job_id;
 
     const { to, subject, body } = payload;
+    const idempotencyKey = `sent_email:${jobId}`;
+
+    // 
+    const acquired = await redis.set(idempotencyKey, 'sending', 'NX', 'EX', PRE_SEND_TTL_S);
+
+    if (!acquired) {
+
+        log.info({ jobId, to }, 'Email already sent or in-flight — skipping (idempotent)');
+        return { cached: true, jobId };
+    }
+
+
     log.info({ to, subject }, "Email handler started");
 
-    // IDEMPOTENCY CHECK
-    if (await isAlreadySent(jobId)) {
-        log.info({ jobId }, "Idempotency: email already sent on a previous attempt — skipping");
-        return { success: true, cached: true, message: 'Email already sent on a previous attempt' };
-    }
+
 
 
     // Send the email
 
     const smtp = await getTransporter(log);
 
-    const info = await smtp.sendMail({
-        from: '"Job Queue System" <noreply@jobqueue.dev>',
-        to,
-        subject,
-        text: body,
-        html: `<p>${body}</p>`,
-    });
+    let info;
+    try {
+
+        info = await smtp.sendMail({
+            from: '"Job Queue System" <noreply@jobqueue.dev>',
+            to,
+            subject,
+            text: body,
+            html: `<p>${body}</p>`,
+        });
+    } catch (smtpErr) {
+        log.warn({ jobId, err: smtpErr.message },
+            'SMTP failed — deleting idempotency key so retry can attempt again');
+        await redis.del(idempotencyKey);
+        throw smtpErr;
+    }
 
 
-    await markAsSent(jobId);
+    await redis.set(idempotencyKey, 'sent', 'EX', POST_SEND_TTL_S);
 
     const previewUrl = nodemailer.getTestMessageUrl(info);
     log.info({ messageId: info.messageId, previewUrl }, "Email dispatched and marked as sent");

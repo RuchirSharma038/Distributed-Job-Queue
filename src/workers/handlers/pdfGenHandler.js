@@ -2,6 +2,7 @@ import PDFDocument from 'pdfkit';
 import fs, { rename } from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
+import crypto from 'crypto';
 
 const OUTPUT_DIR = './public/pdfs';
 
@@ -24,19 +25,24 @@ async function ensureDirectory(dir) {
 
 const processPdf = async (payload, jobId, log) => {
     const { filename, invoiceData } = payload;
-    log.info({ filename }, "Starting PDF generation");
+
+    const safeJobId = jobId.replace(/[^a-zA-Z0-9-_]/g, '');
+    const outputName = `${safeJobId}.pdf`;
+    const filePath = path.join(OUTPUT_DIR, outputName);
+    const publicUrl = `/static/pdfs/${outputName}`;
+
+    log.info({ jobId, requestedFilename: filename, storagePath: filePath },
+        'Starting PDF generation');
 
     await ensureDirectory(OUTPUT_DIR);
-
-    const filePath = path.join(OUTPUT_DIR, filename);
-    const tempPath = `${filePath}.tmp`;
-    const publicUrl = `/static/pdfs/${filename}`;
-
     //IDEMPOTENCY CHECK
     if (await isFileValid(filePath)) {
         log.info({ filename }, "Idempotency: valid file already exists — returning cached URL");
         return { success: true, fileUrl: publicUrl, cached: true };
     }
+
+    const tempName = `${safeJobId}-${process.pid}-${crypto.randomBytes(4).toString('hex')}.pdf.tmp`;
+    const tempPath = path.join(OUTPUT_DIR, tempName);
 
     //Generate the PDF
     const doc = new PDFDocument({ margin: 50 });
@@ -68,15 +74,7 @@ const processPdf = async (payload, jobId, log) => {
 
     // Wait for the stream to finish
     await new Promise((resolve, reject) => {
-        writeStream.on('finish', async () => {
-            try {
-                await fsp.rename(tempPath, filePath);
-                resolve();
-
-            } catch (renameErr) {
-                reject(renameErr);
-            }
-        });
+        writeStream.on('finish', resolve);
 
         writeStream.on('error', async (err) => {
 
@@ -85,9 +83,24 @@ const processPdf = async (payload, jobId, log) => {
             reject(err);
         });
     });
+    try {
+        await fsp.rename(tempPath, filePath);
+    } catch (renameErr) {
+        if (renameErr.code === 'ENOENT' || renameErr.code === 'EEXIST') {
+            
+            log.info({ jobId, code: renameErr.code },
+                'PDF rename race — another worker completed this job, using their output');
+            
+            try { await fsp.unlink(tempPath); } catch { /* already gone*/ }
+        } else {
+            
+            try { await fsp.unlink(tempPath); } catch { /* best effort */ }
+            throw renameErr;
+        }
+    }
     log.info({ filePath, publicUrl }, "PDF generation completed");
 
-    return { success: true, fileUrl: publicUrl, cached: false };
+    return { success: true, fileUrl: publicUrl, cached: false, requestedFilename:filename };
 
 
 };
