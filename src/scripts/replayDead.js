@@ -1,60 +1,55 @@
 import 'dotenv/config';
-
 import redis from '../config/redis.js';
 import prisma from '../config/database.js';
-import { QUEUE_ROUTING, DEAD_QUEUE } from '../config/constants.js';
+import { QUEUE_ROUTING, DEAD_QUEUE, DEFAULT_PRIORITY, getPriorityQueue } from '../config/constants.js';
 import { logger } from '../config/logger.js';
 
-
-// CLI argument handler (in case if we want to execute a specific job)
-
 const args = process.argv.slice(2);
-
 const isDryRun = !args.includes('--execute');
-
 const specificId = (() => {
     const i = args.indexOf('--id');
     return i !== -1 ? args[i + 1] : null;
 })();
 
-
-// Replay logic
-
-// Replaying a single Job
 async function replaySingleJob(jobId, dryRun) {
     const job = await prisma.job.findUnique({
         where: { id: jobId },
-        select: { id: true, type: true, status: true, retry_count: true, error_message: true }
+        select: {
+            id: true, type: true, status: true, priority: true,
+            retry_count: true, error_message: true
+        },
     });
 
     if (!job) {
-        logger.warn(`  [SKIP] ${jobId} — not found in database`);
+        logger.warn({ jobId }, '[SKIP] not found in database');
         return { result: 'skipped', reason: 'not found in DB' };
     }
 
     if (job.status !== 'dead') {
-        logger.warn(`  [SKIP] ${jobId} — status is '${job.status}', not 'dead'`);
+        logger.warn({ jobId, status: job.status }, '[SKIP] status is not dead');
         return { result: 'skipped', reason: `status is '${job.status}'` };
     }
-    const targetQueue = QUEUE_ROUTING[job.type];
 
-    if (!targetQueue) {
-        console.error(`  [ERROR] ${jobId} — unknown type '${job.type}', no queue mapping`);
+    const baseQueue = QUEUE_ROUTING[job.type];
+    if (!baseQueue) {
+        logger.error({ jobId, type: job.type }, '[ERROR] no queue mapping for job type');
         return { result: 'error', reason: `no queue mapping for type '${job.type}'` };
     }
-    logger.info(`  [${dryRun ? 'DRY RUN' : 'REPLAY'}] ${jobId}`);
-    logger.info(`    type:        ${job.type}`);
-    logger.info(`    was retried: ${job.retry_count}x`);
-    logger.info(`    last error:  ${job.error_message}`);
-    logger.info(`    target:      ${targetQueue}`);
 
-    if (dryRun) {
-        return { result: 'would-replay', jobId, targetQueue };
-    }
 
-    //Reset postgres state
-    await prisma.job.update({
-        where: { id: jobId },
+    const targetQueue = getPriorityQueue(baseQueue, job.priority ?? DEFAULT_PRIORITY);
+
+    logger.info({
+        jobId, mode: dryRun ? 'DRY RUN' : 'REPLAY',
+        type: job.type, retryCount: job.retry_count,
+        lastError: job.error_message, targetQueue,
+    }, dryRun ? '[DRY RUN] would replay' : '[REPLAY] replaying');
+
+    if (dryRun) return { result: 'would-replay', jobId, targetQueue };
+
+    //  CAS guard 
+    const reset = await prisma.job.updateMany({
+        where: { id: jobId, status: 'dead' },
         data: {
             status: 'queued',
             retry_count: 0,
@@ -63,68 +58,87 @@ async function replaySingleJob(jobId, dryRun) {
             dead_at: null,
             started_at: null,
             completed_at: null,
-        }
+        },
     });
 
+    if (reset.count === 0) {
+        logger.warn({ jobId }, '[SKIP] job status changed between read and reset — skipping');
+        return { result: 'skipped', reason: 'status changed before reset' };
+    }
 
-    // Push to live queue
-    await redis.lpush(targetQueue, jobId);
+    //  atomic LPUSH + LREM in one pipeline
+    const pipeline = redis.multi();
+    pipeline.lpush(targetQueue, jobId);
+    pipeline.lrem(DEAD_QUEUE, 1, jobId);
+    await pipeline.exec();
 
-    await redis.lrem(DEAD_QUEUE, 1, jobId);
 
-    logger.log(`Replayed to ${targetQueue}`);
-
+    logger.info({ jobId, targetQueue }, '[REPLAYED]');
     return { result: 'replayed', jobId, targetQueue };
-
 }
 
-
 async function main() {
-    logger.log('   Dead Letter Queue Replay Tool    ');
+    logger.info({ mode: isDryRun ? 'DRY RUN' : 'LIVE', specificId },
+        'Dead Letter Queue Replay Tool starting');
 
     if (isDryRun) {
-        logger.warn('NOTICE: Running in DRY RUN mode. Pass --execute to actually replay jobs.\n');
+        logger.warn('Running in DRY RUN mode — pass --execute to actually replay jobs');
     }
 
     try {
         let jobIds;
+
         if (specificId) {
-            logger.info(`Target: single job ${specificId}\n`);
+            logger.info({ jobId: specificId }, 'Target: single job');
             jobIds = [specificId];
         } else {
             jobIds = await redis.lrange(DEAD_QUEUE, 0, -1);
-            logger.info(`Dead queue depth: ${jobIds.length} jobs\n`);
+            logger.info({ depth: jobIds.length }, 'Dead queue depth');
 
             if (jobIds.length === 0) {
-                const orphanedDeadJobs = await prisma.job.findMany({
+                // Postgres fallback
+                const orphans = await prisma.job.findMany({
                     where: { status: 'dead' },
-                    select: { id: true }
+                    select: { id: true },
                 });
-                if (orphanedDeadJobs.length > 0) {
-                    logger.info(`queue:dead is empty, but found ${orphanedDeadJobs.length} orphaned 'dead' jobs in Postgres.`);
-                    logger.info(`These are jobs where the DB write succeeded but Redis LPUSH failed.`);
-                    jobIds = orphanedDeadJobs.map(j => j.id);
+                if (orphans.length > 0) {
+                    logger.info({ count: orphans.length },
+                        'queue:dead is empty but found orphaned dead jobs in Postgres — replaying those');
+                    jobIds = orphans.map(j => j.id);
                 } else {
-                    logger.info('Nothing to replay. Graveyard is empty.');
+                    logger.info('Nothing to replay — graveyard is empty');
                     return;
                 }
             }
         }
 
-        const results = {replayed :0, skipped:0, error:0, 'would-replay':0};
+        const results = { replayed: 0, skipped: 0, error: 0, 'would-replay': 0 };
 
-        for(const jobId of jobIds){
-            const outcome = await replaySingleJob(jobId, isDryRun);
-            results[outcome.result]= (results[outcome.result]??0 )+1;
+        for (const jobId of jobIds) {
+            try {
+                const outcome = await replaySingleJob(jobId, isDryRun);
+                results[outcome.result] = (results[outcome.result] ?? 0) + 1;
+            } catch (err) {
+               
+                logger.error({ jobId, err: err.message }, '[ERROR] Failed to execute replay for job');
+                results.error += 1;
+            }
         }
 
 
-    }finally{
+        logger.info({ results }, 'Replay complete');
+
+        if (isDryRun && results['would-replay'] > 0) {
+            logger.warn('Dry run complete — pass --execute to commit these replays');
+        }
+
+    } finally {
         await prisma.$disconnect();
         redis.disconnect();
     }
 }
-main().catch(err=>{
-    logger.error('\nFatal error:', err.message);
+
+main().catch(err => {
+    logger.error({ err: err.message }, 'Fatal error in replay script');
     process.exit(1);
-})
+});
