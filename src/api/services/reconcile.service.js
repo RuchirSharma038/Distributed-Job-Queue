@@ -80,7 +80,7 @@ async function reconcileStuckScheduled(dryRun) {
     const threshold = new Date(Date.now() - STUCK_THRESHOLD_MS);
 
     const stuck = await prisma.job.findMany({
-        where: { status: 'scheduled', created_at: { lt: threshold } },
+        where: { status: 'scheduled', scheduled_at: { lte: now }, created_at: { lt: threshold } },
         select: { id: true, scheduled_at: true },
     });
     let actedOn = 0;
